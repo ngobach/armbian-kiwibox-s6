@@ -7,11 +7,12 @@
 #
 # Override as needed:
 #   make dtb KERNEL_DIR=~/linux
+#   make deploy BOOT=/Volumes/BOOT        (bootdev is auto-detected)
 #   make deploy BOOT=/Volumes/BOOT BOOTDEV="mmc 1"
 
 KERNEL_DIR ?= $(CURDIR)/.dev/linux
 BOOT       ?=
-BOOTDEV    ?= mmc 0
+BOOTDEV    ?=
 
 .PHONY: all prepare dtb patch deploy clean
 
@@ -28,7 +29,7 @@ patch: prepare
 
 deploy: dtb
 	@test -n "$(BOOT)" || { \
-		echo 'usage: make deploy BOOT=/Volumes/BOOT [BOOTDEV="mmc 0"]'; \
+		echo 'usage: make deploy BOOT=/Volumes/BOOT [BOOTDEV="mmc 1"]'; \
 		exit 1; \
 	}
 	./scripts/deploy.sh "$(BOOT)" "$(BOOTDEV)"

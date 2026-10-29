@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 #
-# Install the Kiwibox S6 DTB and a matching boot script onto an Armbian
-# OneCloud SD card (the FAT boot partition), so the existing vendor
-# Amlogic u-boot can boot it.
+# Install the Kiwibox S6 DTB and the boot script onto the FAT boot partition
+# of an Armbian SD card (typically a OneCloud image used as the base), so the
+# factory Amlogic u-boot can boot it.
+#
+# The compiled script is installed both as boot.scr and as s805_autoscript:
+# the 2015 S805 u-boot searches the medium for the latter (this is what
+# Armbian's aml-s805-mxq.tvb board sets via BOOTSCRIPT_OUTPUT), so booting
+# can be hands-free.
 #
 # Usage:
-#   ./scripts/deploy.sh /Volumes/BOOT            # SD card, bootdev default "mmc 0"
-#   ./scripts/deploy.sh /Volumes/BOOT "mmc 1"    # override default bootdev
-#
-# Options:
-#   --autoscript   also write an "aml_autoscript" (hands-free boot attempt;
-#                  behaviour depends on your u-boot, untested on this box)
+#   ./scripts/deploy.sh /Volumes/BOOT              # bootdev auto-detected
+#   ./scripts/deploy.sh /Volumes/BOOT "mmc 1"      # force eMMC
 #
 # Requires: mkimage (brew install u-boot-tools) and a built DTB
 #           (./scripts/build-dtb.sh).
@@ -22,21 +23,11 @@ root="$(dirname -- "$here")"
 
 name="meson8b-kiwibox-s6"
 dtb="$root/out/$name.dtb"
-autoscript=0
-
-args=()
-for a in "$@"; do
-	case "$a" in
-	--autoscript) autoscript=1 ;;
-	*) args+=("$a") ;;
-	esac
-done
-
-boot="${args[0]:-}"
-bootdev="${args[1]:-mmc 0}"
+boot="${1:-}"
+bootdev="${2:-}"
 
 if [ -z "$boot" ]; then
-	echo "usage: $0 /Volumes/BOOT [bootdev] [--autoscript]" >&2
+	echo "usage: $0 /Volumes/BOOT [bootdev]" >&2
 	exit 1
 fi
 [ -f "$dtb" ] || { echo "error: $dtb missing, run ./scripts/build-dtb.sh" >&2; exit 1; }
@@ -51,48 +42,56 @@ echo ">> installing $name.dtb"
 mkdir -p "$boot/dtb"
 cp "$dtb" "$boot/dtb/$name.dtb"
 
-[ -f "$boot/boot.scr" ] && cp "$boot/boot.scr" "$boot/boot.scr.orig"
-
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 # boot-kiwibox-s6.cmd is the single source of truth (it is also what goes
 # into Armbian as config/bootscripts/boot-kiwibox-s6.cmd).
-sed "s|^\([[:space:]]*setenv bootdev \).*|\1\"$bootdev\"|" \
-	"$root/armbian/config/bootscripts/boot-kiwibox-s6.cmd" >"$tmp/boot.cmd"
-
-mkimage -A arm -T script -C none -n "Kiwibox S6 boot" \
-	-d "$tmp/boot.cmd" "$boot/boot.scr" >/dev/null
-
-cp "$tmp/boot.cmd" "$boot/boot.cmd.kwb"
-
-if [ "$autoscript" = 1 ]; then
-	cat >"$boot/aml_autoscript" <<EOF
-setenv bootdev "$bootdev"
-fatload $bootdev 0x20800000 boot.scr && autoscr 0x20800000
-EOF
-	echo ">> wrote $boot/aml_autoscript"
+src="$root/armbian/config/bootscripts/boot-kiwibox-s6.cmd"
+if [ -n "$bootdev" ]; then
+	{
+		echo "setenv bootdev \"$bootdev\""
+		cat "$src"
+	} >"$tmp/boot.cmd"
+else
+	cp "$src" "$tmp/boot.cmd"
 fi
 
-echo ">> wrote $boot/boot.scr (from boot.cmd, bootdev default: $bootdev)"
+mkimage -A arm -T script -C none -n "Kiwibox S6 boot" \
+	-d "$tmp/boot.cmd" "$tmp/boot.scr" >/dev/null
+
+for f in boot.scr s805_autoscript; do
+	[ -f "$boot/$f" ] && cp "$boot/$f" "$boot/$f.orig"
+	cp "$tmp/boot.scr" "$boot/$f"
+done
+cp "$tmp/boot.cmd" "$boot/boot.cmd.kwb"
+
+echo ">> wrote $boot/boot.scr and $boot/s805_autoscript"
+if [ -n "$bootdev" ]; then
+	echo ">> boot script forces bootdev=\"$bootdev\""
+fi
 
 cat <<EOF
 
-Next step, in the u-boot prompt (serial, 115200 8N1):
+Reboot the box. The factory u-boot should find s805_autoscript and boot
+without any prompt interaction.
 
-  setenv bootdev "$bootdev"
+If it drops into the u-boot prompt instead, the script name or search order
+differs on this loader; boot by hand (serial, 115200 8N1):
+
+  setenv bootdev "mmc 0"        # mmc 0 = SD card, mmc 1 = eMMC, usb 0 = USB
   fatload \${bootdev} 0x20800000 boot.scr && autoscr 0x20800000
 
   (some u-boot builds use "source" instead of "autoscr")
 
-Without a boot script:
+Or without a script at all:
 
-  fatload $bootdev 0x20800000 uImage
-  fatload $bootdev 0x22000000 uInitrd
-  fatload $bootdev 0x21800000 dtb/$name.dtb
-  setenv bootargs root=/dev/mmcblk0p1 rootwait rw console=ttyAML0,115200n8
+  fatload mmc 0 0x20800000 uImage
+  fatload mmc 0 0x22000000 uInitrd
+  fatload mmc 0 0x21800000 dtb/$name.dtb
+  setenv bootargs root=LABEL=armbi_root rootwait rw console=ttyAML0,115200n8
   bootm 0x20800000 0x22000000 0x21800000
 
-Replaced files are backed up as boot.scr.orig; the script this tool
-compiled is also saved next to it as boot.cmd.kwb.
+Replaced files are kept as boot.scr.orig / s805_autoscript.orig; the script
+this tool compiled is saved next to them as boot.cmd.kwb.
 EOF

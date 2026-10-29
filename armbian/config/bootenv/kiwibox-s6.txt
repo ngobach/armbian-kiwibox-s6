@@ -1,7 +1,7 @@
-# console:
-#   both:    HDMI display and serial
-#   display: HDMI display only
-#   serial:  serial only (ttyAML0, 115200)
-#
-# The rootdev=UUID=... line is appended automatically at image build time.
+dtb_file=/dtb/meson8b-kiwibox-s6.dtb
+
+# console: Both HDMI display and serial (ttyAML0, 115200).
+# Other values: display, serial.
 console="both"
+
+# The following contents are auto-generated.

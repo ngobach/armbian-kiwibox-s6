@@ -10,8 +10,11 @@ this box instead of the OneCloud's.
 
 Reconstructed from the vendor firmware `.dev/images/FW_S6_0701.rar` (Android 4.4.2,
 `m201-ota-20150701.zip`), whose boot image carries the DTBs `m8b_m201_1G` and
-`m8b_m201C_512M`, and from the upstream `meson8b-mxq.dts` /
-`meson8b-odroidc1.dts` references.
+`m8b_m201C_512M`. The device tree leans on the upstream `meson8b-mxq.dts` /
+`meson8b-odroidc1.dts` references, and the boot flow (auto-probed `bootdev`,
+`s805_autoscript`, `dtb_file`, `LABEL=armbi_root`) follows Armbian's
+`aml-s805-mxq.tvb` board rather than the OneCloud one — see the notes on
+reference boards at the end.
 
 | Subsystem | Detail | Confidence |
 | --- | --- | --- |
@@ -38,13 +41,13 @@ Reconstructed from the vendor firmware `.dev/images/FW_S6_0701.rar` (Android 4.4
 ├── armbian/                      mirrors the armbian/build tree, copy-in ready
 │   ├── config/boards/kiwibox-s6.csc
 │   ├── config/bootenv/kiwibox-s6.txt
-│   ├── config/bootscripts/boot-kiwibox-s6.cmd
+│   ├── config/bootscripts/boot-kiwibox-s6.cmd   (installed as s805_autoscript)
 │   └── patch/kernel/archive/meson-6.12/kiwibox-0001-add-dts.patch  (generated)
 └── scripts/
     ├── prepare-kernel-tree.sh    sparse kernel clone + Armbian meson8b DTS patches
     ├── build-dtb.sh              clang -E + dtc -> out/*.dtb (~50 ms)
     ├── make-armbian-patch.sh     regenerate the kernel patch from dts/
-    └── deploy.sh                 install DTB + boot.scr on a test SD card
+    └── deploy.sh                 install DTB + boot script on a test SD card
 ```
 
 Only `out/` (build output) and `.dev/` (scratch kernel tree, patch cache, vendor
@@ -61,9 +64,14 @@ make deploy BOOT=/Volumes/BOOT  # FAT boot partition of an Armbian onecloud SD c
 ```
 
 The scripts can also be called directly; `KERNEL_DIR`, `BOOT` and `BOOTDEV` are
-overridable (`make deploy BOOT=/Volumes/BOOT BOOTDEV="mmc 1"`).
+overridable (`make deploy BOOT=/Volumes/BOOT BOOTDEV="mmc 1"`, or leave
+`BOOTDEV` empty to auto-detect the boot device).
 
-Then at the u-boot prompt (serial 115200 8N1):
+Then just reboot. The factory S805 u-boot searches the boot medium for a
+script called `s805_autoscript` (that is what `BOOTSCRIPT_OUTPUT` in
+`armbian/config/boards/kiwibox-s6.csc` is for), and the script probes
+`usb 0..3` then `mmc 0` for itself, exactly like Armbian's MXQ board. If your
+loader does not pick it up, boot by hand at the u-boot prompt (115200 8N1):
 
 ```
 setenv bootdev "mmc 0"          # mmc 0 = SD card, mmc 1 = eMMC, usb 0 = USB
@@ -76,7 +84,7 @@ Older u-boot builds use `source` instead of `autoscr`. Without a boot script:
 fatload mmc 0 0x20800000 uImage
 fatload mmc 0 0x22000000 uInitrd
 fatload mmc 0 0x21800000 dtb/meson8b-kiwibox-s6.dtb
-setenv bootargs root=/dev/mmcblk0p1 rootwait rw console=ttyAML0,115200n8
+setenv bootargs root=LABEL=armbi_root rootwait rw console=ttyAML0,115200n8
 bootm 0x20800000 0x22000000 0x21800000
 ```
 
@@ -148,3 +156,19 @@ If ethernet needs an IC+ PHY driver, add `CONFIG_ICPLUS_PHY=y` to
   `system/etc/remote.conf` in the firmware archive has the scancode map.
 - **4K** HDMI modes may need a bigger CMA pool than the default 64 MiB;
   Armbian's `linux,cma` patch only covers meson8, not meson8b.
+
+## Reference boards
+
+Three meson8b sources in `armbian/build` matter here, and they play different
+roles:
+
+| Source | What it is used for |
+| --- | --- |
+| `config/boards/aml-s805-mxq.tvb` | **Primary reference for boot plumbing.** Same factory-u-boot situation as this box: `BOOTSCRIPT_OUTPUT="s805_autoscript"`, `bootdev` auto-probed over `usb 0..3` then `mmc 0`, `dtb_file` supplied by the bootenv, root by `LABEL=armbi_root`, `usbcore.autosuspend=-1`. |
+| `config/boards/onecloud.csc` | DTS patterns the MXQ tree does not have: 8-bit eMMC with `mmc-pwrseq-emmc`, IR receiver, gpio-keys, LEDs, USB role switching. |
+| upstream `meson8b-mxq.dts` | Hardware baseline: 1 GiB memory map, SD slot, RMII ethernet with an IP101-class PHY, USB, PWM VCCK/VDDEE regulators, SARADC. |
+
+In short: MXQ is the closer sibling (S805 TV box, M201-class, same vendor
+loader conventions) and is the better boot-flow template; the OneCloud tree
+is still the better source for eMMC/IR/key/DTB details. This port takes the
+boot flow from MXQ and keeps the OneCloud-style device-tree pieces.
