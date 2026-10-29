@@ -296,9 +296,20 @@
 	 *               32k clock GPIOX_10, BT reset GPIOX_20
 	 *   firmware path: ".../1g/ap6181/uboot/..."
 	 *
-	 * Not enabled here because upstream defines no pinctrl group for
-	 * the meson8b SDIO port 0 pins (GPIOX_0..9), so enabling slot@0
-	 * would need a pinctrl driver patch first. Sketch once that exists:
+	 * Not enabled here for two driver-level reasons:
+	 *   1. pinctrl-meson8b.c defines no group at all for the SDIO port 0
+	 *      pins (GPIOX_0..9), so the DTS cannot describe them yet.
+	 *   2. meson-mx-sdio.c only registers the FIRST "mmc-slot" child
+	 *      ("we only register the first slot for now"), so adding slot@0
+	 *      would silently take over from the SD card in slot@1 unless the
+	 *      driver grows multi-slot support.
+	 *
+	 * The controller itself is fine: brcmfmac supports BCM43362
+	 * (BRCMF_FW_ENTRY in sdio.c) and brcmfmac43362-sdio.bin ships in
+	 * linux-firmware. The board NVRAM must come from the vendor image:
+	 * system/etc/wifi/40181/nvram.txt -> brcmfmac43362-sdio.txt.
+	 *
+	 * Sketch once the two driver items exist:
 	 *
 	 *   wifi_pwrseq: wifi-pwrseq {
 	 *           compatible = "mmc-pwrseq-simple";
@@ -320,8 +331,7 @@
 	 *                    mmc-pwrseq = <&wifi_pwrseq>;
 	 *                    vmmc-supply = <&wifi_reg>; }; };
 	 *
-	 * plus brcmfmac OOB IRQ on GPIOX_21 and firmware
-	 * brcmfmac43362-sdio.bin/.txt in /lib/firmware/brcm/.
+	 * plus brcmfmac OOB IRQ on GPIOX_21.
 	 */
 };
 

@@ -147,10 +147,13 @@ If ethernet needs an IC+ PHY driver, add `CONFIG_ICPLUS_PHY=y` to
   duty 28/32 → 860 mV and duty 0 → 1140 mV; the DTS uses `pwm-dutycycle-range
   = <100 0>`. Measure VCCK vs. CPU frequency before trusting it under load.
 - **eMMC reset (BOOT_9)** is assumed; see step 3 above.
-- **WiFi needs kernel work**: upstream has no pinctrl group for the meson8b
-  SDIO port 0 pins (`GPIOX_0..9`). The DTS documents the wiring (power
-  GPIOAO_6 + GPIOX_11, 32k clock GPIOX_10, IRQ GPIOX_21, BT reset GPIOX_20,
-  `brcmfmac43362-sdio.bin`) in a comment for when that exists.
+- **WiFi needs driver work, not just DTS.** Two blockers in v6.12: (1)
+  `pinctrl-meson8b.c` has no group for the SDIO port 0 pins (`GPIOX_0..9`),
+  and (2) `meson-mx-sdio.c` registers only the *first* `mmc-slot` child, so
+  enabling slot@0 would displace the SD card in slot@1. The controller side
+  is fine though: brcmfmac supports BCM43362, `brcmfmac43362-sdio.bin` is in
+  linux-firmware, and the board NVRAM is in the vendor image at
+  `system/etc/wifi/40181/nvram.txt` (use it as `brcmfmac43362-sdio.txt`).
 - **IR keymap**: the vendor remote is NEC `0xfe010001`; the mainline
   `meson-ir` + `rc-core` path needs an `ir-keytable` keymap — the vendor
   `system/etc/remote.conf` in the firmware archive has the scancode map.
