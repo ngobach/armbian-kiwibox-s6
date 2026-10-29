@@ -1,0 +1,8 @@
+# build output
+out/
+
+# scratch space: kernel tree, extracted firmware, patch cache, vendor images
+.dev/
+
+# macOS
+.DS_Store

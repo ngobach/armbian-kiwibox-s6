@@ -1,0 +1,7 @@
+# console:
+#   both:    HDMI display and serial
+#   display: HDMI display only
+#   serial:  serial only (ttyAML0, 115200)
+#
+# The rootdev=UUID=... line is appended automatically at image build time.
+console="both"
