@@ -194,6 +194,9 @@
  *   2. drop reset-gpios / interrupt if GPIOH_4 / GPIOH_3 are not wired
  *   3. if it is an IC+ part, make sure CONFIG_ICPLUS_PHY=y is set
  *      (Armbian's linux-meson-current.config does not enable it)
+ *
+ * The icplus,select-interrupt property below is only meaningful for
+ * IC+ PHYs; drop it if the chip turns out to be something else.
  */
 &ethmac {
 	status = "okay";
@@ -296,9 +299,12 @@
 	 *               32k clock GPIOX_10, BT reset GPIOX_20
 	 *   firmware path: ".../1g/ap6181/uboot/..."
 	 *
-	 * Not enabled here for two driver-level reasons:
-	 *   1. pinctrl-meson8b.c defines no group at all for the SDIO port 0
-	 *      pins (GPIOX_0..9), so the DTS cannot describe them yet.
+	 * Not enabled here for two reasons:
+	 *   1. pinctrl-meson8b.c does define the port 0 pin groups (sd_a:
+	 *      GPIOX_0..3 = sd_d0_a..sd_d3_a, GPIOX_8 = sd_clk_a,
+	 *      GPIOX_9 = sd_cmd_a), but meson8b.dtsi exposes no label for
+	 *      them (only sd_b_pins / sdxc_c_pins), so a small dtsi patch
+	 *      is needed before the DTS can reference them.
 	 *   2. meson-mx-sdio.c only registers the FIRST "mmc-slot" child
 	 *      ("we only register the first slot for now"), so adding slot@0
 	 *      would silently take over from the SD card in slot@1 unless the

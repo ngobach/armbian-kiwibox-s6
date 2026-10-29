@@ -61,7 +61,11 @@ mkimage -A arm -T script -C none -n "Kiwibox S6 boot" \
 	-d "$tmp/boot.cmd" "$tmp/boot.scr" >/dev/null
 
 for f in boot.scr s805_autoscript; do
-	[ -f "$boot/$f" ] && cp "$boot/$f" "$boot/$f.orig"
+	# Keep the first backup ever taken: re-running deploy must not replace
+	# the stock Armbian script with a previously deployed copy of ours.
+	if [ -f "$boot/$f" ] && [ ! -f "$boot/$f.orig" ]; then
+		cp "$boot/$f" "$boot/$f.orig"
+	fi
 	cp "$tmp/boot.scr" "$boot/$f"
 done
 cp "$tmp/boot.cmd" "$boot/boot.cmd.kwb"

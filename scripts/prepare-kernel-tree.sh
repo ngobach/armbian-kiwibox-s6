@@ -10,8 +10,9 @@
 #   ./scripts/prepare-kernel-tree.sh [DEST]
 #
 # Environment:
-#   KVER   kernel tag to fetch (default: v6.12.28, matching
-#          config/sources/families/include/meson_common.inc)
+#   KVER           kernel tag to fetch (default: v6.12.28, matching
+#                  config/sources/families/include/meson_common.inc)
+#   PATCH_REFRESH  re-download the cached Armbian patches (PATCH_REFRESH=1)
 #
 set -euo pipefail
 
@@ -24,7 +25,10 @@ DEST="${1:-$root/.dev/linux}"
 PATCH_BASE="https://raw.githubusercontent.com/armbian/build/main/patch/kernel/archive/meson-6.12"
 
 # DTS-only patches needed by this board (mirrors the family's patch order).
+# 0011 only affects usb0_phy (OTG ID gpio), but it is included so the DTB
+# built here is identical to the one Armbian packages.
 PATCHES=(
+	0011-ARM-dts-meson-Add-GPIO-controller-capabilities-to-th.patch
 	0028-ARM-dts-meson-Add-address-cells-size-cells-and-range.patch
 	0059-ARM-dts-meson-add-the-VPU-WiP.patch
 	0061-ARM-dts-meson8-Add-the-shared-CMA-dma-memory-pool.patch
@@ -39,6 +43,12 @@ if [ ! -d "$DEST/.git" ]; then
 		https://github.com/gregkh/linux.git "$DEST"
 	git -C "$DEST" sparse-checkout set arch/arm/boot/dts include/dt-bindings include/uapi
 else
+	have="$(git -C "$DEST" describe --tags --always 2>/dev/null || true)"
+	if [ "$have" != "$KVER" ]; then
+		echo "error: $DEST is at ${have:-an unknown revision}, expected $KVER" >&2
+		echo "       remove the tree (rm -rf \"$DEST\") and re-run" >&2
+		exit 1
+	fi
 	echo ">> reusing existing tree $DEST"
 fi
 
@@ -59,7 +69,10 @@ apply() {
 }
 
 for p in "${PATCHES[@]}"; do
-	[ -f "$cache/$p" ] || curl -sSfL -o "$cache/$p" "$PATCH_BASE/$p"
+	if [ -n "${PATCH_REFRESH:-}" ] || [ ! -f "$cache/$p" ]; then
+		rm -f "$cache/$p"
+		curl -sSfL -o "$cache/$p" "$PATCH_BASE/$p"
+	fi
 	apply "$cache/$p"
 	echo ">> $(echo "$p" | cut -c1-4) applied"
 done

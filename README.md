@@ -8,8 +8,8 @@ this box instead of the OneCloud's.
 
 ## Where this comes from
 
-Reconstructed from the vendor firmware `.dev/images/FW_S6_0701.rar` (Android 4.4.2,
-`m201-ota-20150701.zip`), whose boot image carries the DTBs `m8b_m201_1G` and
+Reconstructed from the vendor firmware in `.dev/FW/` (`m201-ota-20150701.zip`,
+Android 4.4.2), whose boot image carries the DTBs `m8b_m201_1G` and
 `m8b_m201C_512M`. The device tree leans on the upstream `meson8b-mxq.dts` /
 `meson8b-odroidc1.dts` references, and the boot flow (auto-probed `bootdev`,
 `s805_autoscript`, `dtb_file`, `LABEL=armbi_root`) follows Armbian's
@@ -51,7 +51,7 @@ reference boards at the end.
 ```
 
 Only `out/` (build output) and `.dev/` (scratch kernel tree, patch cache, vendor
-firmware in `.dev/images/`) are ignored.
+firmware in `.dev/FW/`) are ignored.
 
 ## Quick start
 
@@ -63,9 +63,9 @@ make dtb                        # out/meson8b-kiwibox-s6.dtb
 make deploy BOOT=/Volumes/BOOT  # FAT boot partition of an Armbian onecloud SD card
 ```
 
-The scripts can also be called directly; `KERNEL_DIR`, `BOOT` and `BOOTDEV` are
-overridable (`make deploy BOOT=/Volumes/BOOT BOOTDEV="mmc 1"`, or leave
-`BOOTDEV` empty to auto-detect the boot device).
+The scripts can also be called directly; `KERNEL_DIR`, `KVER`, `PATCH_REFRESH`,
+`BOOT` and `BOOTDEV` are overridable (`make deploy BOOT=/Volumes/BOOT
+BOOTDEV="mmc 1"`, or leave `BOOTDEV` empty to auto-detect the boot device).
 
 Then just reboot. The factory S805 u-boot searches the boot medium for a
 script called `s805_autoscript` (that is what `BOOTSCRIPT_OUTPUT` in
@@ -104,7 +104,7 @@ without rebuilding the kernel or the image.
 5. **USB / IR / power key** — `evtest` for the remote and KEY_POWER.
 6. **HDMI** — needs the Armbian meson8b DRM/VPU patch series (already assumed
    by the DTS); `modetest`/`drm_info` to confirm.
-7. **WiFi** — last; needs pinctrl work, see below.
+7. **WiFi** — last; needs a dtsi label and multi-slot driver work, see below.
 
 ## Folding into `armbian/build`
 
@@ -145,12 +145,15 @@ If ethernet needs an IC+ PHY driver, add `CONFIG_ICPLUS_PHY=y` to
   address, drop the reset/interrupt lines, and check the PHY markings.
 - **VCCK mapping is unverified.** The vendor `cs_voltage_table` maps
   duty 28/32 → 860 mV and duty 0 → 1140 mV; the DTS uses `pwm-dutycycle-range
-  = <100 0>`. Measure VCCK vs. CPU frequency before trusting it under load.
+  = <100 0>`, which extrapolates past the vendor's 87.5 % endpoint. Prefer
+  `<88 0>` until VCCK has been measured against CPU frequency under load.
 - **eMMC reset (BOOT_9)** is assumed; see step 3 above.
 - **WiFi needs driver work, not just DTS.** Two blockers in v6.12: (1)
-  `pinctrl-meson8b.c` has no group for the SDIO port 0 pins (`GPIOX_0..9`),
-  and (2) `meson-mx-sdio.c` registers only the *first* `mmc-slot` child, so
-  enabling slot@0 would displace the SD card in slot@1. The controller side
+  `pinctrl-meson8b.c` defines the port 0 pin groups (`sd_a`: `GPIOX_0..3`,
+  `GPIOX_8`, `GPIOX_9`), but `meson8b.dtsi` exposes no label for them, so a
+  small dtsi patch adding an `sd_a_pins` node is needed; and (2)
+  `meson-mx-sdio.c` registers only the *first* `mmc-slot` child, so enabling
+  slot@0 would displace the SD card in slot@1. The controller side
   is fine though: brcmfmac supports BCM43362, `brcmfmac43362-sdio.bin` is in
   linux-firmware, and the board NVRAM is in the vendor image at
   `system/etc/wifi/40181/nvram.txt` (use it as `brcmfmac43362-sdio.txt`).
