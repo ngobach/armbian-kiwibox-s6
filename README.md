@@ -205,6 +205,39 @@ Pin: version 26.11.0-trunk
 Pin-Priority: 1001
 ```
 
+## Fitting a 2 GiB SD card
+
+This box is used as a NAS with its data on USB, so the OS image is kept as
+small as it can be:
+
+```sh
+./compile.sh build BOARD=kiwibox-s6 BRANCH=current RELEASE=trixie \
+    BUILD_MINIMAL=yes BUILD_DESKTOP=no KERNEL_CONFIGURE=no PREFER_DOCKER=no
+```
+
+| Variant | Image size |
+| --- | --- |
+| Default (`BUILD_MINIMAL=no`, `BOOTSIZE=512`) | 2712 MiB - does not fit a 2 GB card at all |
+| `BUILD_MINIMAL=yes`, `BOOTSIZE=128` | 1600 MiB |
+| plus `userpatches/customize-image.sh` | **988 MiB** |
+
+On a 2 GB card (~1907 MiB usable) the root partition grows to ~1775 MiB on
+first boot; of that ~650 MiB is used, leaving **~1.1 GiB for packages**.
+
+`customize-image.sh` runs inside the chroot and removes:
+
+- firmware for hardware this SoC cannot have. `qcom` alone is 325 MiB
+  (Qualcomm modem/DSP); the `ath10k`/`ath11k`/`ath12k`/`rkwifi`/`mediatek`/
+  `rtw89`/`aic8800`/`uwe5622`/`intel`/`adsp.*` trees go too. Kept: `brcm/`
+  (the AP6181, 13 MiB), `regulatory.db` and `rtl_*` for cheap USB dongles.
+- `/usr/share/doc`, `/usr/share/man`, the apt lists and package caches
+- `plymouth`, which only delays a headless boot
+
+**Do not "helpfully" recreate `/lib/firmware`.** On merged-usr systems `/lib`
+is a symlink to `usr/lib`, so `/lib/firmware` *is* `/usr/lib/firmware`:
+touching it deletes the firmware tree. That mistake produced an image which
+booted fine but had no `brcmfmac43362-sdio.bin` at all.
+
 ## WiFi (AP6181 / BCM43362)
 
 The WiFi chip is on SDIO port 0 of the same `meson-mx-sdio` controller as the

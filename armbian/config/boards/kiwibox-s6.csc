@@ -14,5 +14,9 @@ BOOTCONFIG="none"
 BOOTSCRIPT="boot-kiwibox-s6.cmd:boot.cmd"
 BOOTSCRIPT_OUTPUT="s805_autoscript"
 BOOTENV_FILE="kiwibox-s6.txt"
-BOOTSIZE="512"
+# Armbian defaults to 512 MiB for a FAT boot partition; this board only puts a
+# uImage (12 MiB), a uInitrd (17 MiB) and the DTBs there, so 128 MiB leaves
+# plenty of room for a second kernel and keeps the whole image small enough to
+# live on a 2 GiB SD card.
+BOOTSIZE="128"
 BOOTFS_TYPE="fat"
