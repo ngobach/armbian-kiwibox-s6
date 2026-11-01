@@ -16,10 +16,13 @@ setenv rootfstype "ext4"
 
 # console: both | display | serial
 setenv console "both"
-# loglevel. Armbian's default is 1 (quiet), which hides every mmc/brcmfmac
-# message; 7 is what we want while bringing this board up. armbianEnv.txt can
-# override it later without touching the card.
-setenv verbosity "7"
+# loglevel. 1 (Armbian's default) hides everything below KERN_EMERG and
+# 7 prints every kernel message - useful while bringing a board up, far too
+# noisy for daily use. 4 keeps errors (which is where "no support for card's
+# volts", mmc timeouts and firmware failures land) and drops the rest.
+# armbianEnv.txt can override this without touching the card:
+#   echo 'verbosity=1' >> /boot/armbianEnv.txt
+setenv verbosity "4"
 
 # USB autosuspend is broken with 6.x kernels on these boxes
 setenv usb_autosuspend "0"
