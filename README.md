@@ -203,7 +203,13 @@ is `GPIOX_21` (gpio_intc hwirq 17).
   duty 28/32 → 860 mV and duty 0 → 1140 mV; the DTS uses `pwm-dutycycle-range
   = <100 0>`, which extrapolates past the vendor's 87.5 % endpoint. Prefer
   `<88 0>` until VCCK has been measured against CPU frequency under load.
-- **eMMC reset (BOOT_9)** is assumed; see step 3 above.
+- **This box has no eMMC.** The factory u-boot boots from NAND and reports
+  `detect NAND device: A serials NAND 8GiB SDTNQGAMA-008G`; mainline has no
+  meson8b NAND driver, and `meson-mx-sdhc` finds nothing to enumerate, so
+  `mmc1`/`sdhc` stays unused and logs "Failed to initialize a non-removable
+  card" after a few retries. SD is the only supported boot medium. The
+  `emmc_pwrseq` node and `&sdhc` enablement are kept until a second unit is
+  checked.
 - **There is no power button.** The vendor firmware declares an Amlogic
   `gpio_keypad` on `GPIOAO_3`, but nothing is wired to it on this box. Exposing
   it as `gpio-keys-polled` makes the key read as permanently pressed, and

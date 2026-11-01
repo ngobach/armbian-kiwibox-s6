@@ -341,6 +341,13 @@
 		cap-power-off-card;
 
 		mmc-pwrseq = <&wifi_pwrseq>;
+		/*
+		 * Mandatory: mmc_alloc_host() leaves ocr_avail at 0 and the MMC core
+		 * only derives it from a vmmc regulator. Without this the host
+		 * advertises no voltage at all and SDIO init dies with
+		 * "no support for card's volts" (error -22).
+		 */
+		vmmc-supply = <&vcc_3v3>;
 
 		/*
 		 * brcmfmac binds to the SDIO function node (function 1) and

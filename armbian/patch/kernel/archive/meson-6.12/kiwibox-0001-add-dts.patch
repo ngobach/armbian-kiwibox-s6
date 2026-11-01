@@ -12,10 +12,10 @@ index a843107..91b9ae1 100644
  	meson8b-mxq.dtb \
 diff --git a/arch/arm/boot/dts/amlogic/meson8b-kiwibox-s6.dts b/arch/arm/boot/dts/amlogic/meson8b-kiwibox-s6.dts
 new file mode 100644
-index 0000000..c1f80bf
+index 0000000..7220838
 --- /dev/null
 +++ b/arch/arm/boot/dts/amlogic/meson8b-kiwibox-s6.dts
-@@ -0,0 +1,399 @@
+@@ -0,0 +1,406 @@
 +// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 +/*
 + * Kiwibox S6 - Amlogic S805 (Meson8b) TV box
@@ -359,6 +359,13 @@ index 0000000..c1f80bf
 +		cap-power-off-card;
 +
 +		mmc-pwrseq = <&wifi_pwrseq>;
++		/*
++		 * Mandatory: mmc_alloc_host() leaves ocr_avail at 0 and the MMC core
++		 * only derives it from a vmmc regulator. Without this the host
++		 * advertises no voltage at all and SDIO init dies with
++		 * "no support for card's volts" (error -22).
++		 */
++		vmmc-supply = <&vcc_3v3>;
 +
 +		/*
 +		 * brcmfmac binds to the SDIO function node (function 1) and
