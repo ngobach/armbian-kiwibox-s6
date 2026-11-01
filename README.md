@@ -130,6 +130,7 @@ That installs:
 | `armbian/patch/kernel/archive/meson-6.12/kiwibox-0001-add-dts.patch` | `patch/kernel/archive/meson-6.12/` |
 | `armbian/patch/kernel/archive/meson-6.12/kiwibox-0002-meson8b-sdio-port0-pins.patch` | `patch/kernel/archive/meson-6.12/` |
 | `armbian/patch/kernel/archive/meson-6.12/kiwibox-0003-meson-mx-sdio-multi-slot.patch` | `patch/kernel/archive/meson-6.12/` |
+| `armbian/userpatches/customize-image-host.sh` | `userpatches/` |
 
 The DTS patch (`kiwibox-0001`) is **generated** from
 `dts/meson8b-kiwibox-s6.dts` by `make patch` (it also adds the
@@ -137,12 +138,33 @@ The DTS patch (`kiwibox-0001`) is **generated** from
 that patch is up to date again. `kiwibox-0002` (pinctrl labels) and
 `kiwibox-0003` (driver) are hand-maintained.
 
-Then, on a Linux host or CI:
+The board NVRAM is deliberately *not* duplicated inside `armbian/`. The image
+build picks it up from `userpatches/kiwibox-firmware/`, so upload it once:
 
 ```sh
-./compile.sh BOARD=kiwibox-s6 BRANCH=current          # full image
-./compile.sh kernel BOARD=kiwibox-s6 BRANCH=current   # kernel + DTB packages only
+rsync -a firmware/ /path/to/armbian/build/userpatches/kiwibox-firmware/
 ```
+
+`userpatches/customize-image-host.sh` installs it into
+`/usr/lib/firmware/brcm/` of the image (it is a no-op for other boards; the
+log warns when the file is missing).
+
+Then, on a Linux host (Debian/Ubuntu, no Docker needed):
+
+```sh
+# kernel + DTB + headers packages only
+./compile.sh kernel BOARD=kiwibox-s6 BRANCH=current PREFER_DOCKER=no
+
+# full image - note the command is `build`; there is no `image` artifact
+./compile.sh build BOARD=kiwibox-s6 BRANCH=current RELEASE=trixie \
+    BUILD_MINIMAL=no BUILD_DESKTOP=no KERNEL_CONFIGURE=no PREFER_DOCKER=no
+```
+
+Without `RELEASE`, `BUILD_MINIMAL` or `KERNEL_CONFIGURE`, Armbian opens a
+`dialog` menu and aborts with "stdin is not a terminal". The image lands in
+`output/images/Armbian-unofficial_*_Kiwibox-s6_trixie_current_*.img` and
+contains the multi-slot kernel, the DTB, `s805_autoscript` and the NVRAM, with
+`BOARD=kiwibox-s6` in `/etc/armbian-release`.
 
 If ethernet needs an IC+ PHY driver, add `CONFIG_ICPLUS_PHY=y` to
 `config/kernel/linux-meson-current.config` (it is not enabled today).
@@ -182,6 +204,10 @@ is `GPIOX_21` (gpio_intc hwirq 17).
   = <100 0>`, which extrapolates past the vendor's 87.5 % endpoint. Prefer
   `<88 0>` until VCCK has been measured against CPU frequency under load.
 - **eMMC reset (BOOT_9)** is assumed; see step 3 above.
+- **Partition offset is untested on this loader.** The image uses Armbian's
+  default `OFFSET=4` (MiB), the same as the MXQ board it is modelled on;
+  `onecloud.csc` pins `OFFSET="16"` instead. If the factory u-boot cannot find
+  the FAT partition, set `OFFSET="16"` in `kiwibox-s6.csc` and rebuild.
 - **WiFi multi-slot support is experimental.** `meson-mx-sdio` shares one
   command engine and the CONF register between ports. `kiwibox-0003`
   registers one host per enabled slot and serializes requests, re-applying

@@ -14,5 +14,11 @@ sudo cp brcmfmac43362-sdio.txt /lib/firmware/brcm/
 sudo modprobe -r brcmfmac; sudo modprobe brcmfmac
 ```
 
+Images built with `./compile.sh build` already contain it: the file is uploaded
+once to `userpatches/kiwibox-firmware/` on the build host and
+`armbian/userpatches/customize-image-host.sh` installs it while the image is
+assembled. Copying it by hand is only needed when reusing a stock OneCloud
+image.
+
 See the main README for the experimental multi-slot kernel patch that lets the
 SD card and WiFi be used at the same time.
