@@ -1,0 +1,785 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kiwibox S6 port <bachnx@users.noreply.github.com>
+Subject: [PATCH] mmc: meson-mx-sdio: support more than one slot (experimental)
+
+The Meson8/8b SDIO controller multiplexes up to three ports onto one
+command engine. The upstream driver only registers the first "mmc-slot"
+child because the MMC core gives mmc_claim_host() exclusive access to a
+host, not to a shared controller, so protocol sequences of one slot can
+be interleaved with requests of another slot (see the 2017 linux-mmc
+discussion). A correct implementation needs MMC core changes.
+
+This patch is an out-of-tree stop-gap for boards that need a second
+slot (e.g. an SD card plus an SDIO WiFi module) at the same time:
+- one mmc_host is registered per enabled "mmc-slot" child
+- the shared command engine and CONF register are claimed per request
+- the per-slot bus width and clock rate are re-applied at the start of
+  every request (they live in the shared CONF register)
+
+It is expected to work for independent SD and SDIO cards, but it is not
+upstream quality and needs hardware validation.
+---
+
+diff --git a/drivers/mmc/host/meson-mx-sdio.c b/drivers/mmc/host/meson-mx-sdio.c
+index a11577f..52cfb09 100644
+--- a/drivers/mmc/host/meson-mx-sdio.c
++++ b/drivers/mmc/host/meson-mx-sdio.c
+@@ -17,10 +17,12 @@
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
+ #include <linux/ioport.h>
++#include <linux/list.h>
+ #include <linux/platform_device.h>
+ #include <linux/of_platform.h>
+ #include <linux/timer.h>
+ #include <linux/types.h>
++#include <linux/wait.h>
+ 
+ #include <linux/mmc/host.h>
+ #include <linux/mmc/mmc.h>
+@@ -98,8 +100,10 @@
+ #define MESON_MX_SDIO_RESPONSE_CRC16_BITS			(16 - 1)
+ #define MESON_MX_SDIO_MAX_SLOTS					3
+ 
+-struct meson_mx_mmc_host {
+-	struct device			*controller_dev;
++struct meson_mx_mmc_host;
++
++struct meson_mx_mmc_shared {
++	struct device			*dev;
+ 
+ 	struct clk			*parent_clk;
+ 	struct clk			*core_clk;
+@@ -110,16 +114,32 @@ struct meson_mx_mmc_host {
+ 
+ 	void __iomem			*base;
+ 	int				irq;
+-	spinlock_t			irq_lock;
++	spinlock_t			lock;
++
++	/*
++	 * The command engine and the CONF register (bus width, clock
++	 * divider) are shared between all slots, so only one slot may have
++	 * a request in flight at any time.
++	 */
++	struct meson_mx_mmc_host	*active;
++	struct meson_mx_mmc_host	*irq_host;
++	wait_queue_head_t		idle_wq;
++	struct list_head		slots;
++};
++
++struct meson_mx_mmc_host {
++	struct meson_mx_mmc_shared	*shared;
++	struct mmc_host			*mmc;
+ 
+ 	struct timer_list		cmd_timeout;
+ 
+ 	unsigned int			slot_id;
+-	struct mmc_host			*mmc;
+ 
+ 	struct mmc_request		*mrq;
+ 	struct mmc_command		*cmd;
+ 	int				error;
++
++	struct list_head		node;
+ };
+ 
+ static void meson_mx_mmc_mask_bits(struct mmc_host *mmc, char reg, u32 mask,
+@@ -128,16 +148,17 @@ static void meson_mx_mmc_mask_bits(struct mmc_host *mmc, char reg, u32 mask,
+ 	struct meson_mx_mmc_host *host = mmc_priv(mmc);
+ 	u32 regval;
+ 
+-	regval = readl(host->base + reg);
++	regval = readl(host->shared->base + reg);
+ 	regval &= ~mask;
+ 	regval |= (val & mask);
+ 
+-	writel(regval, host->base + reg);
++	writel(regval, host->shared->base + reg);
+ }
+ 
+-static void meson_mx_mmc_soft_reset(struct meson_mx_mmc_host *host)
++static void meson_mx_mmc_soft_reset(struct meson_mx_mmc_shared *shared)
+ {
+-	writel(MESON_MX_SDIO_IRQC_SOFT_RESET, host->base + MESON_MX_SDIO_IRQC);
++	writel(MESON_MX_SDIO_IRQC_SOFT_RESET,
++	       shared->base + MESON_MX_SDIO_IRQC);
+ 	udelay(2);
+ }
+ 
+@@ -213,13 +234,13 @@ static void meson_mx_mmc_start_cmd(struct mmc_host *mmc,
+ 	send |= FIELD_PREP(MESON_MX_SDIO_SEND_COMMAND_INDEX_MASK,
+ 			   (0x40 | cmd->opcode));
+ 
+-	spin_lock_irqsave(&host->irq_lock, irqflags);
++	spin_lock_irqsave(&host->shared->lock, irqflags);
+ 
+-	mult = readl(host->base + MESON_MX_SDIO_MULT);
++	mult = readl(host->shared->base + MESON_MX_SDIO_MULT);
+ 	mult &= ~MESON_MX_SDIO_MULT_PORT_SEL_MASK;
+ 	mult |= FIELD_PREP(MESON_MX_SDIO_MULT_PORT_SEL_MASK, host->slot_id);
+ 	mult |= BIT(31);
+-	writel(mult, host->base + MESON_MX_SDIO_MULT);
++	writel(mult, host->shared->base + MESON_MX_SDIO_MULT);
+ 
+ 	/* enable the CMD done interrupt */
+ 	meson_mx_mmc_mask_bits(mmc, MESON_MX_SDIO_IRQC,
+@@ -231,37 +252,59 @@ static void meson_mx_mmc_start_cmd(struct mmc_host *mmc,
+ 			       MESON_MX_SDIO_IRQS_CMD_INT,
+ 			       MESON_MX_SDIO_IRQS_CMD_INT);
+ 
+-	writel(cmd->arg, host->base + MESON_MX_SDIO_ARGU);
+-	writel(ext, host->base + MESON_MX_SDIO_EXT);
+-	writel(send, host->base + MESON_MX_SDIO_SEND);
++	writel(cmd->arg, host->shared->base + MESON_MX_SDIO_ARGU);
++	writel(ext, host->shared->base + MESON_MX_SDIO_EXT);
++	writel(send, host->shared->base + MESON_MX_SDIO_SEND);
+ 
+-	spin_unlock_irqrestore(&host->irq_lock, irqflags);
++	spin_unlock_irqrestore(&host->shared->lock, irqflags);
+ 
+ 	mod_timer(&host->cmd_timeout, jiffies + timeout);
+ }
+ 
+ static void meson_mx_mmc_request_done(struct meson_mx_mmc_host *host)
+ {
++	struct meson_mx_mmc_shared *shared = host->shared;
+ 	struct mmc_request *mrq;
++	unsigned long irqflags;
++
++	spin_lock_irqsave(&shared->lock, irqflags);
+ 
+ 	mrq = host->mrq;
++	if (!mrq) {
++		/* already completed from the IRQ or timeout path */
++		spin_unlock_irqrestore(&shared->lock, irqflags);
++		return;
++	}
+ 
+-	if (host->cmd->error)
+-		meson_mx_mmc_soft_reset(host);
++	if (host->cmd && host->cmd->error)
++		meson_mx_mmc_soft_reset(shared);
+ 
+ 	host->mrq = NULL;
+ 	host->cmd = NULL;
++	shared->active = NULL;
++
++	spin_unlock_irqrestore(&shared->lock, irqflags);
+ 
++	wake_up(&shared->idle_wq);
+ 	mmc_request_done(host->mmc, mrq);
+ }
+ 
+-static void meson_mx_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
++/*
++ * The clock divider and the bus width live in the shared CONF register.
++ * They are programmed again at the start of every request (and here while
++ * no request is in flight) so that each slot runs with its own ios.
++ */
++static int meson_mx_mmc_apply_ios(struct meson_mx_mmc_host *host)
+ {
+-	struct meson_mx_mmc_host *host = mmc_priv(mmc);
+-	unsigned short vdd = ios->vdd;
+-	unsigned long clk_rate = ios->clock;
++	struct mmc_host *mmc = host->mmc;
++	struct meson_mx_mmc_shared *shared = host->shared;
++	unsigned long clk_rate = mmc->ios.clock;
++	int err;
++
++	/* re-apply the shared registers for the slot that is selected next */
++	meson_mx_mmc_soft_reset(shared);
+ 
+-	switch (ios->bus_width) {
++	switch (mmc->ios.bus_width) {
+ 	case MMC_BUS_WIDTH_1:
+ 		meson_mx_mmc_mask_bits(mmc, MESON_MX_SDIO_CONF,
+ 				       MESON_MX_SDIO_CONF_BUS_WIDTH, 0);
+@@ -276,20 +319,32 @@ static void meson_mx_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
+ 	case MMC_BUS_WIDTH_8:
+ 	default:
+ 		dev_err(mmc_dev(mmc), "unsupported bus width: %d\n",
+-			ios->bus_width);
+-		host->error = -EINVAL;
+-		return;
++			mmc->ios.bus_width);
++		return -EINVAL;
+ 	}
+ 
+-	host->error = clk_set_rate(host->cfg_div_clk, ios->clock);
+-	if (host->error) {
++	if (!clk_rate)
++		return 0;
++
++	err = clk_set_rate(shared->cfg_div_clk, clk_rate);
++	if (err) {
+ 		dev_warn(mmc_dev(mmc),
+-				"failed to set MMC clock to %lu: %d\n",
+-				clk_rate, host->error);
+-		return;
++			 "failed to set MMC clock to %lu: %d\n",
++			 clk_rate, err);
++		return err;
+ 	}
+ 
+-	mmc->actual_clock = clk_get_rate(host->cfg_div_clk);
++	mmc->actual_clock = clk_get_rate(shared->cfg_div_clk);
++
++	return 0;
++}
++
++static void meson_mx_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
++{
++	struct meson_mx_mmc_host *host = mmc_priv(mmc);
++	struct meson_mx_mmc_shared *shared = host->shared;
++	unsigned short vdd = ios->vdd;
++	unsigned long irqflags;
+ 
+ 	switch (ios->power_mode) {
+ 	case MMC_POWER_OFF:
+@@ -304,7 +359,32 @@ static void meson_mx_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
+ 				return;
+ 		}
+ 		break;
++	default:
++		break;
++	}
++
++	/*
++	 * Apply the shared settings only while the controller is idle, and
++	 * claim it for the duration so that a request of another slot cannot
++	 * interleave.
++	 */
++	for (;;) {
++		spin_lock_irqsave(&shared->lock, irqflags);
++		if (!shared->active) {
++			shared->active = host;
++			spin_unlock_irqrestore(&shared->lock, irqflags);
++			break;
++		}
++		spin_unlock_irqrestore(&shared->lock, irqflags);
++		wait_event(shared->idle_wq, !READ_ONCE(shared->active));
+ 	}
++
++	host->error = meson_mx_mmc_apply_ios(host);
++
++	spin_lock_irqsave(&shared->lock, irqflags);
++	shared->active = NULL;
++	spin_unlock_irqrestore(&shared->lock, irqflags);
++	wake_up(&shared->idle_wq);
+ }
+ 
+ static int meson_mx_mmc_map_dma(struct mmc_host *mmc, struct mmc_request *mrq)
+@@ -337,22 +417,41 @@ static int meson_mx_mmc_map_dma(struct mmc_host *mmc, struct mmc_request *mrq)
+ static void meson_mx_mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
+ {
+ 	struct meson_mx_mmc_host *host = mmc_priv(mmc);
+-	struct mmc_command *cmd = mrq->cmd;
++	struct meson_mx_mmc_shared *shared = host->shared;
++	unsigned long irqflags;
++
++	/*
++	 * All slots share the command engine, so wait until it is free and
++	 * claim it for this request.
++	 */
++	for (;;) {
++		spin_lock_irqsave(&shared->lock, irqflags);
++		if (!shared->active) {
++			shared->active = host;
++			spin_unlock_irqrestore(&shared->lock, irqflags);
++			break;
++		}
++		spin_unlock_irqrestore(&shared->lock, irqflags);
++		wait_event(shared->idle_wq, !READ_ONCE(shared->active));
++	}
++
++	if (!host->error)
++		host->error = meson_mx_mmc_apply_ios(host);
+ 
+ 	if (!host->error)
+ 		host->error = meson_mx_mmc_map_dma(mmc, mrq);
+ 
++	host->mrq = mrq;
++
+ 	if (host->error) {
+-		cmd->error = host->error;
+-		mmc_request_done(mmc, mrq);
++		mrq->cmd->error = host->error;
++		meson_mx_mmc_request_done(host);
+ 		return;
+ 	}
+ 
+-	host->mrq = mrq;
+-
+ 	if (mrq->data)
+ 		writel(sg_dma_address(mrq->data->sg),
+-		       host->base + MESON_MX_SDIO_ADDR);
++		       shared->base + MESON_MX_SDIO_ADDR);
+ 
+ 	if (mrq->sbc)
+ 		meson_mx_mmc_start_cmd(mmc, mrq->sbc);
+@@ -367,21 +466,21 @@ static void meson_mx_mmc_read_response(struct mmc_host *mmc,
+ 	u32 mult;
+ 	int i, resp[4];
+ 
+-	mult = readl(host->base + MESON_MX_SDIO_MULT);
++	mult = readl(host->shared->base + MESON_MX_SDIO_MULT);
+ 	mult |= MESON_MX_SDIO_MULT_WR_RD_OUT_INDEX;
+ 	mult &= ~MESON_MX_SDIO_MULT_RESP_READ_INDEX_MASK;
+ 	mult |= FIELD_PREP(MESON_MX_SDIO_MULT_RESP_READ_INDEX_MASK, 0);
+-	writel(mult, host->base + MESON_MX_SDIO_MULT);
++	writel(mult, host->shared->base + MESON_MX_SDIO_MULT);
+ 
+ 	if (cmd->flags & MMC_RSP_136) {
+ 		for (i = 0; i <= 3; i++)
+-			resp[3 - i] = readl(host->base + MESON_MX_SDIO_ARGU);
++			resp[3 - i] = readl(host->shared->base + MESON_MX_SDIO_ARGU);
+ 		cmd->resp[0] = (resp[0] << 8) | ((resp[1] >> 24) & 0xff);
+ 		cmd->resp[1] = (resp[1] << 8) | ((resp[2] >> 24) & 0xff);
+ 		cmd->resp[2] = (resp[2] << 8) | ((resp[3] >> 24) & 0xff);
+ 		cmd->resp[3] = (resp[3] << 8);
+ 	} else if (cmd->flags & MMC_RSP_PRESENT) {
+-		cmd->resp[0] = readl(host->base + MESON_MX_SDIO_ARGU);
++		cmd->resp[0] = readl(host->shared->base + MESON_MX_SDIO_ARGU);
+ 	}
+ }
+ 
+@@ -416,38 +515,55 @@ static irqreturn_t meson_mx_mmc_process_cmd_irq(struct meson_mx_mmc_host *host,
+ 
+ static irqreturn_t meson_mx_mmc_irq(int irq, void *data)
+ {
+-	struct meson_mx_mmc_host *host = (void *) data;
++	struct meson_mx_mmc_shared *shared = data;
++	struct meson_mx_mmc_host *host;
++	unsigned long irqflags;
+ 	u32 irqs, send;
+ 	irqreturn_t ret;
+ 
+-	spin_lock(&host->irq_lock);
++	spin_lock_irqsave(&shared->lock, irqflags);
+ 
+-	irqs = readl(host->base + MESON_MX_SDIO_IRQS);
+-	send = readl(host->base + MESON_MX_SDIO_SEND);
++	host = shared->active;
++	irqs = readl(shared->base + MESON_MX_SDIO_IRQS);
++	send = readl(shared->base + MESON_MX_SDIO_SEND);
+ 
+-	if (irqs & MESON_MX_SDIO_IRQS_CMD_INT)
++	if (host && (irqs & MESON_MX_SDIO_IRQS_CMD_INT))
+ 		ret = meson_mx_mmc_process_cmd_irq(host, irqs, send);
+ 	else
+ 		ret = IRQ_HANDLED;
+ 
++	if (ret == IRQ_WAKE_THREAD)
++		shared->irq_host = host;
++
+ 	/* finally ACK all pending interrupts */
+-	writel(irqs, host->base + MESON_MX_SDIO_IRQS);
++	writel(irqs, shared->base + MESON_MX_SDIO_IRQS);
+ 
+-	spin_unlock(&host->irq_lock);
++	spin_unlock_irqrestore(&shared->lock, irqflags);
+ 
+ 	return ret;
+ }
+ 
+ static irqreturn_t meson_mx_mmc_irq_thread(int irq, void *irq_data)
+ {
+-	struct meson_mx_mmc_host *host = (void *) irq_data;
+-	struct mmc_command *cmd = host->cmd, *next_cmd;
++	struct meson_mx_mmc_shared *shared = irq_data;
++	struct meson_mx_mmc_host *host;
++	struct mmc_command *cmd, *next_cmd;
++	unsigned long irqflags;
++
++	spin_lock_irqsave(&shared->lock, irqflags);
++	host = shared->irq_host;
++	shared->irq_host = NULL;
++	spin_unlock_irqrestore(&shared->lock, irqflags);
+ 
+-	if (WARN_ON(!cmd))
++	if (!host)
+ 		return IRQ_HANDLED;
+ 
+ 	del_timer_sync(&host->cmd_timeout);
+ 
++	cmd = host->cmd;
++	if (!cmd)
++		return IRQ_HANDLED;
++
+ 	if (cmd->data) {
+ 		dma_unmap_sg(mmc_dev(host->mmc), cmd->data->sg,
+ 				cmd->data->sg_len,
+@@ -468,17 +584,18 @@ static irqreturn_t meson_mx_mmc_irq_thread(int irq, void *irq_data)
+ static void meson_mx_mmc_timeout(struct timer_list *t)
+ {
+ 	struct meson_mx_mmc_host *host = from_timer(host, t, cmd_timeout);
++	struct meson_mx_mmc_shared *shared = host->shared;
+ 	unsigned long irqflags;
+ 	u32 irqc;
+ 
+-	spin_lock_irqsave(&host->irq_lock, irqflags);
++	spin_lock_irqsave(&shared->lock, irqflags);
+ 
+ 	/* disable the CMD interrupt */
+-	irqc = readl(host->base + MESON_MX_SDIO_IRQC);
++	irqc = readl(shared->base + MESON_MX_SDIO_IRQC);
+ 	irqc &= ~MESON_MX_SDIO_IRQC_ARC_CMD_INT_EN;
+-	writel(irqc, host->base + MESON_MX_SDIO_IRQC);
++	writel(irqc, shared->base + MESON_MX_SDIO_IRQC);
+ 
+-	spin_unlock_irqrestore(&host->irq_lock, irqflags);
++	spin_unlock_irqrestore(&shared->lock, irqflags);
+ 
+ 	/*
+ 	 * skip the timeout handling if the interrupt handler already processed
+@@ -489,8 +606,8 @@ static void meson_mx_mmc_timeout(struct timer_list *t)
+ 
+ 	dev_dbg(mmc_dev(host->mmc),
+ 		"Timeout on CMD%u (IRQS = 0x%08x, ARGU = 0x%08x)\n",
+-		host->cmd->opcode, readl(host->base + MESON_MX_SDIO_IRQS),
+-		readl(host->base + MESON_MX_SDIO_ARGU));
++		host->cmd->opcode, readl(shared->base + MESON_MX_SDIO_IRQS),
++		readl(shared->base + MESON_MX_SDIO_ARGU));
+ 
+ 	host->cmd->error = -ETIMEDOUT;
+ 
+@@ -504,27 +621,6 @@ static struct mmc_host_ops meson_mx_mmc_ops = {
+ 	.get_ro			= mmc_gpio_get_ro,
+ };
+ 
+-static struct platform_device *meson_mx_mmc_slot_pdev(struct device *parent)
+-{
+-	struct device_node *slot_node;
+-	struct platform_device *pdev;
+-
+-	/*
+-	 * TODO: the MMC core framework currently does not support
+-	 * controllers with multiple slots properly. So we only register
+-	 * the first slot for now
+-	 */
+-	slot_node = of_get_compatible_child(parent->of_node, "mmc-slot");
+-	if (!slot_node) {
+-		dev_warn(parent, "no 'mmc-slot' sub-node found\n");
+-		return ERR_PTR(-ENOENT);
+-	}
+-
+-	pdev = of_platform_device_create(slot_node, NULL, parent);
+-	of_node_put(slot_node);
+-
+-	return pdev;
+-}
+ 
+ static int meson_mx_mmc_add_host(struct meson_mx_mmc_host *host)
+ {
+@@ -559,9 +655,9 @@ static int meson_mx_mmc_add_host(struct meson_mx_mmc_host *host)
+ 	mmc->max_blk_size /= BITS_PER_BYTE;
+ 
+ 	/* Get the min and max supported clock rates */
+-	mmc->f_min = clk_round_rate(host->cfg_div_clk, 1);
+-	mmc->f_max = clk_round_rate(host->cfg_div_clk,
+-				    clk_get_rate(host->parent_clk));
++	mmc->f_min = clk_round_rate(host->shared->cfg_div_clk, 1);
++	mmc->f_max = clk_round_rate(host->shared->cfg_div_clk,
++				    clk_get_rate(host->shared->parent_clk));
+ 
+ 	mmc->caps |= MMC_CAP_CMD23 | MMC_CAP_WAIT_WHILE_BUSY;
+ 	mmc->ops = &meson_mx_mmc_ops;
+@@ -577,15 +673,15 @@ static int meson_mx_mmc_add_host(struct meson_mx_mmc_host *host)
+ 	return 0;
+ }
+ 
+-static int meson_mx_mmc_register_clks(struct meson_mx_mmc_host *host)
++static int meson_mx_mmc_register_clks(struct meson_mx_mmc_shared *shared)
+ {
+ 	struct clk_init_data init;
+ 	const char *clk_div_parent, *clk_fixed_factor_parent;
+ 
+-	clk_fixed_factor_parent = __clk_get_name(host->parent_clk);
+-	init.name = devm_kasprintf(host->controller_dev, GFP_KERNEL,
++	clk_fixed_factor_parent = __clk_get_name(shared->parent_clk);
++	init.name = devm_kasprintf(shared->dev, GFP_KERNEL,
+ 				   "%s#fixed_factor",
+-				   dev_name(host->controller_dev));
++				   dev_name(shared->dev));
+ 	if (!init.name)
+ 		return -ENOMEM;
+ 
+@@ -593,18 +689,18 @@ static int meson_mx_mmc_register_clks(struct meson_mx_mmc_host *host)
+ 	init.flags = 0;
+ 	init.parent_names = &clk_fixed_factor_parent;
+ 	init.num_parents = 1;
+-	host->fixed_factor.div = 2;
+-	host->fixed_factor.mult = 1;
+-	host->fixed_factor.hw.init = &init;
+-
+-	host->fixed_factor_clk = devm_clk_register(host->controller_dev,
+-						 &host->fixed_factor.hw);
+-	if (WARN_ON(IS_ERR(host->fixed_factor_clk)))
+-		return PTR_ERR(host->fixed_factor_clk);
+-
+-	clk_div_parent = __clk_get_name(host->fixed_factor_clk);
+-	init.name = devm_kasprintf(host->controller_dev, GFP_KERNEL,
+-				   "%s#div", dev_name(host->controller_dev));
++	shared->fixed_factor.div = 2;
++	shared->fixed_factor.mult = 1;
++	shared->fixed_factor.hw.init = &init;
++
++	shared->fixed_factor_clk = devm_clk_register(shared->dev,
++						    &shared->fixed_factor.hw);
++	if (WARN_ON(IS_ERR(shared->fixed_factor_clk)))
++		return PTR_ERR(shared->fixed_factor_clk);
++
++	clk_div_parent = __clk_get_name(shared->fixed_factor_clk);
++	init.name = devm_kasprintf(shared->dev, GFP_KERNEL,
++				   "%s#div", dev_name(shared->dev));
+ 	if (!init.name)
+ 		return -ENOMEM;
+ 
+@@ -612,93 +708,127 @@ static int meson_mx_mmc_register_clks(struct meson_mx_mmc_host *host)
+ 	init.flags = CLK_SET_RATE_PARENT;
+ 	init.parent_names = &clk_div_parent;
+ 	init.num_parents = 1;
+-	host->cfg_div.reg = host->base + MESON_MX_SDIO_CONF;
+-	host->cfg_div.shift = MESON_MX_SDIO_CONF_CMD_CLK_DIV_SHIFT;
+-	host->cfg_div.width = MESON_MX_SDIO_CONF_CMD_CLK_DIV_WIDTH;
+-	host->cfg_div.hw.init = &init;
+-	host->cfg_div.flags = CLK_DIVIDER_ALLOW_ZERO;
++	shared->cfg_div.reg = shared->base + MESON_MX_SDIO_CONF;
++	shared->cfg_div.shift = MESON_MX_SDIO_CONF_CMD_CLK_DIV_SHIFT;
++	shared->cfg_div.width = MESON_MX_SDIO_CONF_CMD_CLK_DIV_WIDTH;
++	shared->cfg_div.hw.init = &init;
++	shared->cfg_div.flags = CLK_DIVIDER_ALLOW_ZERO;
+ 
+-	host->cfg_div_clk = devm_clk_register(host->controller_dev,
+-					      &host->cfg_div.hw);
+-	if (WARN_ON(IS_ERR(host->cfg_div_clk)))
+-		return PTR_ERR(host->cfg_div_clk);
++	shared->cfg_div_clk = devm_clk_register(shared->dev,
++						&shared->cfg_div.hw);
++	if (WARN_ON(IS_ERR(shared->cfg_div_clk)))
++		return PTR_ERR(shared->cfg_div_clk);
+ 
+ 	return 0;
+ }
+ 
+-static int meson_mx_mmc_probe(struct platform_device *pdev)
++static int meson_mx_mmc_add_slot(struct meson_mx_mmc_shared *shared,
++				 struct device_node *slot_node)
+ {
+ 	struct platform_device *slot_pdev;
+-	struct mmc_host *mmc;
+ 	struct meson_mx_mmc_host *host;
+-	int ret, irq;
+-	u32 conf;
++	struct mmc_host *mmc;
++	int ret;
+ 
+-	slot_pdev = meson_mx_mmc_slot_pdev(&pdev->dev);
++	slot_pdev = of_platform_device_create(slot_node, NULL, shared->dev);
+ 	if (!slot_pdev)
+-		return -ENODEV;
+-	else if (IS_ERR(slot_pdev))
+-		return PTR_ERR(slot_pdev);
++		return -ENOMEM;
+ 
+ 	mmc = mmc_alloc_host(sizeof(*host), &slot_pdev->dev);
+ 	if (!mmc) {
+ 		ret = -ENOMEM;
+-		goto error_unregister_slot_pdev;
++		goto error_destroy_slot;
+ 	}
+ 
+ 	host = mmc_priv(mmc);
+ 	host->mmc = mmc;
+-	host->controller_dev = &pdev->dev;
+-
+-	spin_lock_init(&host->irq_lock);
++	host->shared = shared;
+ 	timer_setup(&host->cmd_timeout, meson_mx_mmc_timeout, 0);
+ 
+-	platform_set_drvdata(pdev, host);
+-
+-	host->base = devm_platform_ioremap_resource(pdev, 0);
+-	if (IS_ERR(host->base)) {
+-		ret = PTR_ERR(host->base);
++	ret = meson_mx_mmc_add_host(host);
++	if (ret)
+ 		goto error_free_mmc;
++
++	list_add_tail(&host->node, &shared->slots);
++
++	return 0;
++
++error_free_mmc:
++	mmc_free_host(mmc);
++error_destroy_slot:
++	of_platform_device_destroy(&slot_pdev->dev, NULL);
++	return ret;
++}
++
++static void meson_mx_mmc_remove_slots(struct meson_mx_mmc_shared *shared)
++{
++	struct meson_mx_mmc_host *host, *tmp;
++
++	list_for_each_entry_safe(host, tmp, &shared->slots, node) {
++		struct device *slot_dev = mmc_dev(host->mmc);
++
++		del_timer_sync(&host->cmd_timeout);
++		mmc_remove_host(host->mmc);
++		list_del(&host->node);
++		of_platform_device_destroy(slot_dev, NULL);
++		mmc_free_host(host->mmc);
+ 	}
++}
++
++static int meson_mx_mmc_probe(struct platform_device *pdev)
++{
++	struct meson_mx_mmc_shared *shared;
++	struct device_node *slot_node;
++	bool have_slot = false;
++	int ret, irq;
++	u32 conf;
++
++	shared = devm_kzalloc(&pdev->dev, sizeof(*shared), GFP_KERNEL);
++	if (!shared)
++		return -ENOMEM;
++
++	shared->dev = &pdev->dev;
++	spin_lock_init(&shared->lock);
++	init_waitqueue_head(&shared->idle_wq);
++	INIT_LIST_HEAD(&shared->slots);
++	platform_set_drvdata(pdev, shared);
++
++	shared->base = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(shared->base))
++		return PTR_ERR(shared->base);
+ 
+ 	irq = platform_get_irq(pdev, 0);
+-	if (irq < 0) {
+-		ret = irq;
+-		goto error_free_mmc;
+-	}
++	if (irq < 0)
++		return irq;
+ 
+-	ret = devm_request_threaded_irq(host->controller_dev, irq,
++	ret = devm_request_threaded_irq(shared->dev, irq,
+ 					meson_mx_mmc_irq,
+ 					meson_mx_mmc_irq_thread, IRQF_ONESHOT,
+-					NULL, host);
++					NULL, shared);
+ 	if (ret)
+-		goto error_free_mmc;
++		return ret;
+ 
+-	host->core_clk = devm_clk_get(host->controller_dev, "core");
+-	if (IS_ERR(host->core_clk)) {
+-		ret = PTR_ERR(host->core_clk);
+-		goto error_free_mmc;
+-	}
++	shared->core_clk = devm_clk_get(shared->dev, "core");
++	if (IS_ERR(shared->core_clk))
++		return PTR_ERR(shared->core_clk);
+ 
+-	host->parent_clk = devm_clk_get(host->controller_dev, "clkin");
+-	if (IS_ERR(host->parent_clk)) {
+-		ret = PTR_ERR(host->parent_clk);
+-		goto error_free_mmc;
+-	}
++	shared->parent_clk = devm_clk_get(shared->dev, "clkin");
++	if (IS_ERR(shared->parent_clk))
++		return PTR_ERR(shared->parent_clk);
+ 
+-	ret = meson_mx_mmc_register_clks(host);
++	ret = meson_mx_mmc_register_clks(shared);
+ 	if (ret)
+-		goto error_free_mmc;
++		return ret;
+ 
+-	ret = clk_prepare_enable(host->core_clk);
++	ret = clk_prepare_enable(shared->core_clk);
+ 	if (ret) {
+-		dev_err(host->controller_dev, "Failed to enable core clock\n");
+-		goto error_free_mmc;
++		dev_err(shared->dev, "Failed to enable core clock\n");
++		return ret;
+ 	}
+ 
+-	ret = clk_prepare_enable(host->cfg_div_clk);
++	ret = clk_prepare_enable(shared->cfg_div_clk);
+ 	if (ret) {
+-		dev_err(host->controller_dev, "Failed to enable MMC clock\n");
++		dev_err(shared->dev, "Failed to enable MMC clock\n");
+ 		goto error_disable_core_clk;
+ 	}
+ 
+@@ -707,42 +837,45 @@ static int meson_mx_mmc_probe(struct platform_device *pdev)
+ 	conf |= FIELD_PREP(MESON_MX_SDIO_CONF_M_ENDIAN_MASK, 0x3);
+ 	conf |= FIELD_PREP(MESON_MX_SDIO_CONF_WRITE_NWR_MASK, 0x2);
+ 	conf |= FIELD_PREP(MESON_MX_SDIO_CONF_WRITE_CRC_OK_STATUS_MASK, 0x2);
+-	writel(conf, host->base + MESON_MX_SDIO_CONF);
++	writel(conf, shared->base + MESON_MX_SDIO_CONF);
+ 
+-	meson_mx_mmc_soft_reset(host);
++	meson_mx_mmc_soft_reset(shared);
+ 
+-	ret = meson_mx_mmc_add_host(host);
+-	if (ret)
+-		goto error_disable_clks;
++	for_each_available_child_of_node(shared->dev->of_node, slot_node) {
++		if (!of_device_is_compatible(slot_node, "mmc-slot"))
++			continue;
++
++		ret = meson_mx_mmc_add_slot(shared, slot_node);
++		if (ret)
++			goto error_remove_slots;
++
++		have_slot = true;
++	}
++
++	if (!have_slot) {
++		dev_warn(shared->dev, "no 'mmc-slot' sub-node found\n");
++		ret = -ENODEV;
++		goto error_remove_slots;
++	}
+ 
+ 	return 0;
+ 
+-error_disable_clks:
+-	clk_disable_unprepare(host->cfg_div_clk);
++error_remove_slots:
++	meson_mx_mmc_remove_slots(shared);
++	clk_disable_unprepare(shared->cfg_div_clk);
+ error_disable_core_clk:
+-	clk_disable_unprepare(host->core_clk);
+-error_free_mmc:
+-	mmc_free_host(mmc);
+-error_unregister_slot_pdev:
+-	of_platform_device_destroy(&slot_pdev->dev, NULL);
++	clk_disable_unprepare(shared->core_clk);
+ 	return ret;
+ }
+ 
+ static void meson_mx_mmc_remove(struct platform_device *pdev)
+ {
+-	struct meson_mx_mmc_host *host = platform_get_drvdata(pdev);
+-	struct device *slot_dev = mmc_dev(host->mmc);
+-
+-	del_timer_sync(&host->cmd_timeout);
+-
+-	mmc_remove_host(host->mmc);
+-
+-	of_platform_device_destroy(slot_dev, NULL);
++	struct meson_mx_mmc_shared *shared = platform_get_drvdata(pdev);
+ 
+-	clk_disable_unprepare(host->cfg_div_clk);
+-	clk_disable_unprepare(host->core_clk);
++	meson_mx_mmc_remove_slots(shared);
+ 
+-	mmc_free_host(host->mmc);
++	clk_disable_unprepare(shared->cfg_div_clk);
++	clk_disable_unprepare(shared->core_clk);
+ }
+ 
+ static const struct of_device_id meson_mx_mmc_of_match[] = {

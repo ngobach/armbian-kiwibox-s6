@@ -23,7 +23,7 @@ reference boards at the end.
 | eMMC | SDHC controller, 8-bit; reset line on BOOT_9 assumed | medium |
 | SD card | SDIO controller slot 1, card detect GPIO `CARD_6` | verified |
 | Ethernet | internal MAC, 100 Mbit RMII; PHY model unknown | low |
-| WiFi | Ampak AP6181 (BCM43362) on SDIO slot 0, IRQ GPIOX_21 | verified (unwired) |
+| WiFi | Ampak AP6181 (BCM43362) on SDIO slot 0, IRQ GPIOX_21 | verified (DTS wired; SD+WiFi needs kiwibox-0003) |
 | Bluetooth | Broadcom, reset GPIOX_20 | verified (unwired) |
 | IR | internal IR decoder, NEC `factory_code 0xfe010001` | verified |
 | Power key | GPIOAO_3, key code 0x74 (KEY_POWER) | verified |
@@ -38,11 +38,16 @@ reference boards at the end.
 ├── Makefile                      convenience targets (prepare/dtb/patch/deploy)
 ├── dts/
 │   └── meson8b-kiwibox-s6.dts    board device tree (source of truth)
+├── firmware/
+│   └── brcmfmac43362-sdio.txt    AP6181 NVRAM from the vendor image
 ├── armbian/                      mirrors the armbian/build tree, copy-in ready
 │   ├── config/boards/kiwibox-s6.csc
 │   ├── config/bootenv/kiwibox-s6.txt
 │   ├── config/bootscripts/boot-kiwibox-s6.cmd   (installed as s805_autoscript)
-│   └── patch/kernel/archive/meson-6.12/kiwibox-0001-add-dts.patch  (generated)
+│   └── patch/kernel/archive/meson-6.12/
+│       ├── kiwibox-0001-add-dts.patch                  (generated)
+│       ├── kiwibox-0002-meson8b-sdio-port0-pins.patch  SDIO port 0 + 32 kHz pins
+│       └── kiwibox-0003-meson-mx-sdio-multi-slot.patch SD card + WiFi together
 └── scripts/
     ├── prepare-kernel-tree.sh    sparse kernel clone + Armbian meson8b DTS patches
     ├── build-dtb.sh              clang -E + dtc -> out/*.dtb (~50 ms)
@@ -104,7 +109,8 @@ without rebuilding the kernel or the image.
 5. **USB / IR / power key** — `evtest` for the remote and KEY_POWER.
 6. **HDMI** — needs the Armbian meson8b DRM/VPU patch series (already assumed
    by the DTS); `modetest`/`drm_info` to confirm.
-7. **WiFi** — last; needs a dtsi label and multi-slot driver work, see below.
+7. **WiFi** — last; needs `kiwibox-0003` in the kernel and the board NVRAM,
+   see below.
 
 ## Folding into `armbian/build`
 
@@ -122,10 +128,14 @@ That installs:
 | `armbian/config/bootenv/kiwibox-s6.txt` | `config/bootenv/` |
 | `armbian/config/bootscripts/boot-kiwibox-s6.cmd` | `config/bootscripts/` |
 | `armbian/patch/kernel/archive/meson-6.12/kiwibox-0001-add-dts.patch` | `patch/kernel/archive/meson-6.12/` |
+| `armbian/patch/kernel/archive/meson-6.12/kiwibox-0002-meson8b-sdio-port0-pins.patch` | `patch/kernel/archive/meson-6.12/` |
+| `armbian/patch/kernel/archive/meson-6.12/kiwibox-0003-meson-mx-sdio-multi-slot.patch` | `patch/kernel/archive/meson-6.12/` |
 
-The kernel patch is **generated** from `dts/meson8b-kiwibox-s6.dts` by
-`make patch` (it also adds the `meson8b-kiwibox-s6.dtb` Makefile entry). Edit
-the DTS, run `make patch`, and the patch is up to date again.
+The DTS patch (`kiwibox-0001`) is **generated** from
+`dts/meson8b-kiwibox-s6.dts` by `make patch` (it also adds the
+`meson8b-kiwibox-s6.dtb` Makefile entry). Edit the DTS, run `make patch`, and
+that patch is up to date again. `kiwibox-0002` (pinctrl labels) and
+`kiwibox-0003` (driver) are hand-maintained.
 
 Then, on a Linux host or CI:
 
@@ -136,6 +146,30 @@ Then, on a Linux host or CI:
 
 If ethernet needs an IC+ PHY driver, add `CONFIG_ICPLUS_PHY=y` to
 `config/kernel/linux-meson-current.config` (it is not enabled today).
+
+## WiFi (AP6181 / BCM43362)
+
+The WiFi chip is on SDIO port 0 of the same `meson-mx-sdio` controller as the
+SD card (port 1). The mainline driver registers only the first `mmc-slot`
+child, so the DTS lists the SD card first: a stock kernel boots from the card
+and simply omits WiFi. To have **SD + eMMC + WiFi at the same time**, build a
+kernel with `kiwibox-0002` and `kiwibox-0003` (the Armbian patches installed
+above), which registers a host for each slot and serializes access to the
+shared command engine.
+
+1. Boot a stock OneCloud image with this DTB and install to eMMC, or build and
+   install the patched kernel first:
+   `./compile.sh kernel BOARD=kiwibox-s6 BRANCH=current`, then install the
+   `linux-image-current-meson` package from `output/debs/`.
+2. Install the board NVRAM (the rootfs is ext4, so do this on the box):
+   `sudo cp firmware/brcmfmac43362-sdio.txt /lib/firmware/brcm/`
+3. Reboot and check `dmesg | grep -i brcmfmac` and `ip -br link` (`wlan0`).
+4. Join a network with `nmtui` or `armbian-config`.
+
+Debug: `dmesg | grep -i mmc` should list the SD card (`mmc0`), the eMMC
+(`mmc1`) and one `mmc` host for the SDIO slot. The 32 kHz output is muxed on
+`GPIOX_10`, power comes from `GPIOAO_6` + `GPIOX_11`, and the out-of-band IRQ
+is `GPIOX_21` (gpio_intc hwirq 17).
 
 ## Caveats / TODO
 
@@ -148,15 +182,18 @@ If ethernet needs an IC+ PHY driver, add `CONFIG_ICPLUS_PHY=y` to
   = <100 0>`, which extrapolates past the vendor's 87.5 % endpoint. Prefer
   `<88 0>` until VCCK has been measured against CPU frequency under load.
 - **eMMC reset (BOOT_9)** is assumed; see step 3 above.
-- **WiFi needs driver work, not just DTS.** Two blockers in v6.12: (1)
-  `pinctrl-meson8b.c` defines the port 0 pin groups (`sd_a`: `GPIOX_0..3`,
-  `GPIOX_8`, `GPIOX_9`), but `meson8b.dtsi` exposes no label for them, so a
-  small dtsi patch adding an `sd_a_pins` node is needed; and (2)
-  `meson-mx-sdio.c` registers only the *first* `mmc-slot` child, so enabling
-  slot@0 would displace the SD card in slot@1. The controller side
-  is fine though: brcmfmac supports BCM43362, `brcmfmac43362-sdio.bin` is in
-  linux-firmware, and the board NVRAM is in the vendor image at
-  `system/etc/wifi/40181/nvram.txt` (use it as `brcmfmac43362-sdio.txt`).
+- **WiFi multi-slot support is experimental.** `meson-mx-sdio` shares one
+  command engine and the CONF register between ports. `kiwibox-0003`
+  registers one host per enabled slot and serializes requests, re-applying
+  the per-slot bus width and clock at every request. Upstream nevertheless
+  considers multi-slot support broken by design without MMC core changes, so
+  this patch is out-of-tree and needs hardware validation. Without it, a
+  stock kernel registers only the first slot (the SD card). brcmfmac itself
+  supports BCM43362 and the board NVRAM is shipped in `firmware/`.
+
+  If the patched driver misbehaves, set `status = "disabled"` on `slot@0` in
+  the DTS (SD card only) or boot a stock kernel; the DT ordering keeps the
+  card working there.
 - **IR keymap**: the vendor remote is NEC `0xfe010001`; the mainline
   `meson-ir` + `rc-core` path needs an `ir-keytable` keymap — the vendor
   `system/etc/remote.conf` in the firmware archive has the scancode map.

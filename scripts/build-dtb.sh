@@ -42,6 +42,15 @@ if ! grep -q 'hdmi_tx: hdmi-tx@42000' "$KERNEL_DIR/arch/arm/boot/dts/amlogic/mes
 	exit 1
 fi
 
+# The board DTS references the SDIO port 0 / 32 kHz pinctrl labels added by
+# kiwibox-0002; without them dtc fails with an unhelpful unknown-label error.
+if ! grep -q 'sd_a_pins: sd-a' "$KERNEL_DIR/arch/arm/boot/dts/amlogic/meson8b.dtsi"; then
+	echo "error: $KERNEL_DIR/arch/arm/boot/dts/amlogic/meson8b.dtsi is missing the" >&2
+	echo "       kiwibox-0002 pinctrl labels (sd_a_pins, xtal_32k_out_pins)." >&2
+	echo "       run ./scripts/prepare-kernel-tree.sh to prepare a patched tree." >&2
+	exit 1
+fi
+
 mkdir -p "$out"
 
 "$CC" -E -nostdinc -undef -D__DTS__ -x assembler-with-cpp \

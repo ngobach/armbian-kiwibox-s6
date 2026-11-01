@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kiwibox S6 port <bachnx@users.noreply.github.com>
+Subject: ARM: dts: meson8b: expose the SDIO port 0 and 32 kHz pinctrl groups
+
+pinctrl-meson8b.c has always defined the "sd_a" groups for the SDIO
+controller's port 0 (GPIOX_0..3, GPIOX_8, GPIOX_9) and the "xtal_32k_out"
+group used to clock Broadcom WiFi/BT modules.  Only the port 1 ("sd_b")
+and eMMC ("sdxc_c") groups were exposed in meson8b.dtsi, so boards using
+port 0 (such as the Kiwibox S6's AP6181) cannot reference them.
+
+Add the two labels, no functional change for existing boards.
+---
+ arch/arm/boot/dts/amlogic/meson8b.dtsi | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/arch/arm/boot/dts/amlogic/meson8b.dtsi b/arch/arm/boot/dts/amlogic/meson8b.dtsi
+--- a/arch/arm/boot/dts/amlogic/meson8b.dtsi
++++ b/arch/arm/boot/dts/amlogic/meson8b.dtsi
+@@ -628,16 +628,35 @@
+ 			mux {
+ 				groups = "sd_d0_b", "sd_d1_b", "sd_d2_b",
+ 					"sd_d3_b", "sd_clk_b", "sd_cmd_b";
+ 				function = "sd_b";
+ 				bias-disable;
+ 			};
+ 		};
+ 
++		/* SDIO controller port 0, used by SDIO WiFi/BT modules */
++		sd_a_pins: sd-a {
++			mux {
++				groups = "sd_d0_a", "sd_d1_a", "sd_d2_a",
++					 "sd_d3_a", "sd_clk_a", "sd_cmd_a";
++				function = "sd_a";
++				bias-disable;
++			};
++		};
++
++		/* 32.768 kHz clock output for the WiFi/BT module */
++		xtal_32k_out_pins: xtal-32k-out {
++			mux {
++				groups = "xtal_32k_out";
++				function = "xtal";
++				bias-disable;
++			};
++		};
++
+ 		sdxc_c_pins: sdxc-c {
+ 			mux {
+ 				groups = "sdxc_d0_c", "sdxc_d13_c",
+ 					 "sdxc_d47_c", "sdxc_clk_c",
+ 					 "sdxc_cmd_c";
+ 				function = "sdxc_c";
+ 				bias-pull-up;
+ 			};

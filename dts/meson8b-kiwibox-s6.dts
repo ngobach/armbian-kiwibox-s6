@@ -7,20 +7,29 @@
  * DTBs m8b_m201_1G / m8b_m201C_512M) plus the upstream meson8b-mxq and
  * meson8b-odroidc1 reference trees.
  *
- * Build against a v6.12.y tree carrying Armbian's
- * patch/kernel/archive/meson-6.12 series (VPU/HDMI/CEC/hhi patches).
+ * Build against a v6.12.y tree carrying:
+ *   - Armbian's patch/kernel/archive/meson-6.12 series (VPU/HDMI/CEC/hhi)
+ *   - kiwibox-0002: SDIO port 0 pinctrl groups for meson8b
+ *   - kiwibox-0003: meson-mx-sdio multi-slot support (experimental)
+ *
+ * The SD card (port 1) and the WiFi chip (port 0) are both driven by the
+ * meson-mx-sdio controller.  Stock kernels only register the first
+ * "mmc-slot" child, so slot@1 (SD) is listed first: a stock kernel boots
+ * from the card and ignores slot@0, while kiwibox-0003 registers both.
  *
  * Confidence per subsystem:
  *   HIGH    CPU, RAM (1 GiB), SD card, IR receiver, HDMI-only display,
  *           power button (GPIOAO_3), USB host ports
- *   MEDIUM  eMMC (8-bit via SDHC controller; reset line on BOOT_9 assumed)
- *   LOW     ethernet PHY wiring, VCCK PWM regulator mapping, WiFi
+ *   MEDIUM  eMMC (8-bit via SDHC controller; reset line on BOOT_9 assumed),
+ *           WiFi (card and power pins known, 32 kHz and IRQ untested)
+ *   LOW     ethernet PHY wiring, VCCK PWM regulator mapping
  */
 
 /dts-v1/;
 
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
+#include <dt-bindings/interrupt-controller/irq.h>
 
 #include "meson8b.dtsi"
 
@@ -57,6 +66,18 @@
 	emmc_pwrseq: emmc-pwrseq {
 		compatible = "mmc-pwrseq-emmc";
 		reset-gpios = <&gpio BOOT_9 GPIO_ACTIVE_LOW>;
+	};
+
+	/*
+	 * AP6181 power enable. Both pins are "power_on_pin" in the vendor
+	 * DTS; declaring them active-low makes mmc-pwrseq-simple drive them
+	 * physically high for power-on (and low on power-off).
+	 */
+	wifi_pwrseq: wifi-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		reset-gpios = <&gpio GPIOX_11 GPIO_ACTIVE_LOW>,
+			      <&gpio_ao GPIOAO_6 GPIO_ACTIVE_LOW>;
+		post-power-on-delay-ms = <200>;
 	};
 
 	hdmi-connector {
@@ -107,9 +128,7 @@
 	 * Front panel power button: vendor gpio_keypad on GPIOAO_3,
 	 * key_code 0x74 (KEY_POWER). Polled on purpose - the AO GPIO bank
 	 * is not an interrupt controller and the gpio_intc channel for
-	 * GPIOAO_3 has not been verified on this board yet. Once confirmed,
-	 * this can become "gpio-keys" with interrupt-parent = <&gpio_intc>
-	 * and interrupts = <3 IRQ_TYPE_LEVEL_LOW>.
+	 * GPIOAO_3 has not been verified on this board yet.
 	 */
 	keys {
 		compatible = "gpio-keys-polled";
@@ -273,10 +292,22 @@
 &sdio {
 	status = "okay";
 
-	pinctrl-0 = <&sd_b_pins>;
+	/*
+	 * All used ports are muxed at once: the CARD bank (SD card) and the
+	 * GPIOX bank (SDIO port 0 + the 32 kHz output for the WiFi module).
+	 */
+	pinctrl-0 = <&sd_b_pins>, <&sd_a_pins>, <&xtal_32k_out_pins>;
 	pinctrl-names = "default";
 
-	/* SD card: vendor port 1, card detect on CARD_6 */
+	/*
+	 * Two of the controller's three ports are used:
+	 *   slot@1  SD card, CARD bank, card detect on CARD_6
+	 *   slot@0  AP6181 WiFi, GPIOX bank
+	 *
+	 * The driver registers only the first "mmc-slot" without
+	 * kiwibox-0003, so slot@1 must stay first: a stock kernel then
+	 * still boots from the SD card (WiFi is simply absent).
+	 */
 	sd_card_slot: slot@1 {
 		compatible = "mmc-slot";
 		reg = <1>;
@@ -295,50 +326,45 @@
 
 	/*
 	 * WiFi is an Ampak AP6181 (Broadcom BCM43362) on SDIO port 0:
-	 *   vendor DTS: irq GPIOX_21, power GPIOAO_6 + GPIOX_11,
-	 *               32k clock GPIOX_10, BT reset GPIOX_20
-	 *   firmware path: ".../1g/ap6181/uboot/..."
+	 *   data/clk/cmd  GPIOX_0..3, GPIOX_8, GPIOX_9 (sd_a groups)
+	 *   power enable  GPIOX_11 + GPIOAO_6
+	 *   32 kHz clock  GPIOX_10 (xtal_32k_out)
+	 *   OOB interrupt GPIOX_21 (vendor "GPIO_IRQ_HIGH")
+	 *   BT reset      GPIOX_20 (not used yet)
 	 *
-	 * Not enabled here for two reasons:
-	 *   1. pinctrl-meson8b.c does define the port 0 pin groups (sd_a:
-	 *      GPIOX_0..3 = sd_d0_a..sd_d3_a, GPIOX_8 = sd_clk_a,
-	 *      GPIOX_9 = sd_cmd_a), but meson8b.dtsi exposes no label for
-	 *      them (only sd_b_pins / sdxc_c_pins), so a small dtsi patch
-	 *      is needed before the DTS can reference them.
-	 *   2. meson-mx-sdio.c only registers the FIRST "mmc-slot" child
-	 *      ("we only register the first slot for now"), so adding slot@0
-	 *      would silently take over from the SD card in slot@1 unless the
-	 *      driver grows multi-slot support.
-	 *
-	 * The controller itself is fine: brcmfmac supports BCM43362
-	 * (BRCMF_FW_ENTRY in sdio.c) and brcmfmac43362-sdio.bin ships in
-	 * linux-firmware. The board NVRAM must come from the vendor image:
-	 * system/etc/wifi/40181/nvram.txt -> brcmfmac43362-sdio.txt.
-	 *
-	 * Sketch once the two driver items exist:
-	 *
-	 *   wifi_pwrseq: wifi-pwrseq {
-	 *           compatible = "mmc-pwrseq-simple";
-	 *           reset-gpios = <&gpio GPIOX_11 GPIO_ACTIVE_LOW>;
-	 *   };
-	 *
-	 *   wifi_reg: regulator-wifi {
-	 *           compatible = "regulator-fixed";
-	 *           regulator-name = "WIFI_3V3";
-	 *           regulator-min-microvolt = <3300000>;
-	 *           regulator-max-microvolt = <3300000>;
-	 *           gpio = <&gpio_ao GPIOAO_6 GPIO_ACTIVE_HIGH>;
-	 *           enable-active-high;
-	 *   };
-	 *
-	 *   &sdio { slot@0 { compatible = "mmc-slot"; reg = <0>;
-	 *                    bus-width = <4>; non-removable; no-sd;
-	 *                    keep-power-in-suspend; cap-power-off-card;
-	 *                    mmc-pwrseq = <&wifi_pwrseq>;
-	 *                    vmmc-supply = <&wifi_reg>; }; };
-	 *
-	 * plus brcmfmac OOB IRQ on GPIOX_21.
+	 * The board NVRAM from the vendor image is shipped in firmware/ and
+	 * must be installed as /lib/firmware/brcm/brcmfmac43362-sdio.txt.
 	 */
+	wifi_slot: slot@0 {
+		compatible = "mmc-slot";
+		reg = <0>;
+		status = "okay";
+
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		bus-width = <4>;
+		max-frequency = <30000000>;
+		non-removable;
+		no-sd;
+		no-mmc;
+		keep-power-in-suspend;
+		cap-power-off-card;
+
+		mmc-pwrseq = <&wifi_pwrseq>;
+
+		/*
+		 * brcmfmac binds to the SDIO function node (function 1) and
+		 * picks up the out-of-band interrupt from here.
+		 */
+		wifi@1 {
+			compatible = "brcm,bcm4329-fmac";
+			reg = <1>;
+
+			interrupt-parent = <&gpio_intc>;
+			interrupts = <GPIOX_21 IRQ_TYPE_LEVEL_HIGH>;
+		};
+	};
 };
 
 &uart_AO {
