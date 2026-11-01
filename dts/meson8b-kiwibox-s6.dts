@@ -358,7 +358,14 @@
 			reg = <1>;
 
 			interrupt-parent = <&gpio_intc>;
-			interrupts = <GPIOX_21 IRQ_TYPE_LEVEL_HIGH>;
+			/*
+			 * The vendor declares "GPIO_IRQ_HIGH", but Amlogic's gpio_intc
+			 * is an edge-triggered controller: asking for a level type
+			 * fails to map ("type mismatch, failed to map hwirq-17")
+			 * and brcmfmac then falls back to the in-band SDIO interrupt.
+			 * Request the assertion edge instead.
+			 */
+			interrupts = <GPIOX_21 IRQ_TYPE_EDGE_RISING>;
 		};
 	};
 };

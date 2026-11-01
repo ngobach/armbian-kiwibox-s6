@@ -219,14 +219,24 @@ is `GPIOX_21` (gpio_intc hwirq 17).
   default `OFFSET=4` (MiB), the same as the MXQ board it is modelled on;
   `onecloud.csc` pins `OFFSET="16"` instead. If the factory u-boot cannot find
   the FAT partition, set `OFFSET="16"` in `kiwibox-s6.csc` and rebuild.
-- **WiFi multi-slot support is experimental.** `meson-mx-sdio` shares one
-  command engine and the CONF register between ports. `kiwibox-0003`
-  registers one host per enabled slot and serializes requests, re-applying
-  the per-slot bus width and clock at every request. Upstream nevertheless
-  considers multi-slot support broken by design without MMC core changes, so
-  this patch is out-of-tree and needs hardware validation. Without it, a
-  stock kernel registers only the first slot (the SD card). brcmfmac itself
-  supports BCM43362 and the board NVRAM is shipped in `firmware/`.
+- **WiFi works on hardware, SD and WiFi share the one controller.**
+  `meson-mx-sdio` shares a command engine and the CONF register between ports;
+  `kiwibox-0003` registers one host per enabled slot and serializes requests,
+  re-applying the per-slot bus width and clock at every request. Verified on a
+  Kiwibox S6 (M201, 1 GiB): `mmc0` = SD card (`mmcblk0`, rootfs) and `mmc2` =
+  BCM43362 come up together, brcmfmac loads `brcmfmac43362-sdio.bin` plus the
+  board NVRAM, `wlan0` associates and passes traffic (`ping 8.8.8.8` answers)
+  with the rootfs on the same controller. Upstream still considers multi-slot
+  broken by design without MMC core changes, so the patch stays out-of-tree.
+- **Every slot needs a `vmmc-supply`.** `mmc_alloc_host()` leaves `ocr_avail`
+  at 0 and the MMC core only derives it from a vmmc regulator, so a slot
+  without one advertises no voltage at all and SDIO init dies with
+  `no support for card's volts` / error -22. This cost us a boot; both slots
+  now point at `vcc_3v3`.
+- **The WiFi out-of-band interrupt is optional.** `gpio_intc` is
+  edge-triggered, so `IRQ_TYPE_LEVEL_HIGH` never mapped and brcmfmac fell back
+  to the in-band SDIO interrupt (which works fine). The DTS now asks for
+  `IRQ_TYPE_EDGE_RISING`, matching the vendor's `GPIO_IRQ_HIGH` intent.
 
   If the patched driver misbehaves, set `status = "disabled"` on `slot@0` in
   the DTS (SD card only) or boot a stock kernel; the DT ordering keeps the
