@@ -204,6 +204,11 @@ is `GPIOX_21` (gpio_intc hwirq 17).
   = <100 0>`, which extrapolates past the vendor's 87.5 % endpoint. Prefer
   `<88 0>` until VCCK has been measured against CPU frequency under load.
 - **eMMC reset (BOOT_9)** is assumed; see step 3 above.
+- **There is no power button.** The vendor firmware declares an Amlogic
+  `gpio_keypad` on `GPIOAO_3`, but nothing is wired to it on this box. Exposing
+  it as `gpio-keys-polled` makes the key read as permanently pressed, and
+  `systemd-logind` then powers the box off ~35 s after boot (seen on hardware:
+  clean shutdown, no panic). Keep the node out of the DTS.
 - **Partition offset is untested on this loader.** The image uses Armbian's
   default `OFFSET=4` (MiB), the same as the MXQ board it is modelled on;
   `onecloud.csc` pins `OFFSET="16"` instead. If the factory u-boot cannot find

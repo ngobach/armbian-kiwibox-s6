@@ -1,19 +1,21 @@
 diff --git a/arch/arm/boot/dts/amlogic/Makefile b/arch/arm/boot/dts/amlogic/Makefile
-index a843107..bf3b12d 100644
+index a843107..91b9ae1 100644
 --- a/arch/arm/boot/dts/amlogic/Makefile
 +++ b/arch/arm/boot/dts/amlogic/Makefile
-@@ -3,4 +3,5 @@ dtb-$(CONFIG_MACH_MESON6) += \
+@@ -2,6 +2,7 @@
+ dtb-$(CONFIG_MACH_MESON6) += \
  	meson6-atv1200.dtb
  dtb-$(CONFIG_MACH_MESON8) += \
 +	meson8b-kiwibox-s6.dtb \
  	meson8-minix-neo-x8.dtb \
  	meson8b-ec100.dtb \
+ 	meson8b-mxq.dtb \
 diff --git a/arch/arm/boot/dts/amlogic/meson8b-kiwibox-s6.dts b/arch/arm/boot/dts/amlogic/meson8b-kiwibox-s6.dts
 new file mode 100644
-index 0000000..6173bdd
+index 0000000..c1f80bf
 --- /dev/null
 +++ b/arch/arm/boot/dts/amlogic/meson8b-kiwibox-s6.dts
-@@ -0,0 +1,410 @@
+@@ -0,0 +1,399 @@
 +// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 +/*
 + * Kiwibox S6 - Amlogic S805 (Meson8b) TV box
@@ -35,7 +37,7 @@ index 0000000..6173bdd
 + *
 + * Confidence per subsystem:
 + *   HIGH    CPU, RAM (1 GiB), SD card, IR receiver, HDMI-only display,
-+ *           power button (GPIOAO_3), USB host ports
++ *           USB host ports
 + *   MEDIUM  eMMC (8-bit via SDHC controller; reset line on BOOT_9 assumed),
 + *           WiFi (card and power pins known, 32 kHz and IRQ untested)
 + *   LOW     ethernet PHY wiring, VCCK PWM regulator mapping
@@ -44,7 +46,6 @@ index 0000000..6173bdd
 +/dts-v1/;
 +
 +#include <dt-bindings/gpio/gpio.h>
-+#include <dt-bindings/input/input.h>
 +#include <dt-bindings/interrupt-controller/irq.h>
 +
 +#include "meson8b.dtsi"
@@ -141,22 +142,12 @@ index 0000000..6173bdd
 +	};
 +
 +	/*
-+	 * Front panel power button: vendor gpio_keypad on GPIOAO_3,
-+	 * key_code 0x74 (KEY_POWER). Polled on purpose - the AO GPIO bank
-+	 * is not an interrupt controller and the gpio_intc channel for
-+	 * GPIOAO_3 has not been verified on this board yet.
++	 * No keys node here on purpose: this box has no power button. The
++	 * vendor firmware declares a gpio_keypad on GPIOAO_3, but nothing is
++	 * wired to it, so a gpio-keys-polled node on that pin reports a
++	 * permanently pressed KEY_POWER - systemd-logind then powers the box
++	 * off about 35 seconds after boot.
 +	 */
-+	keys {
-+		compatible = "gpio-keys-polled";
-+		poll-interval = <100>;
-+		autorepeat;
-+
-+		power {
-+			label = "power";
-+			linux,code = <KEY_POWER>;
-+			gpios = <&gpio_ao GPIOAO_3 GPIO_ACTIVE_LOW>;
-+		};
-+	};
 +
 +	vcc_5v: regulator-vcc-5v {
 +		compatible = "regulator-fixed";
