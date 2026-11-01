@@ -169,6 +169,42 @@ contains the multi-slot kernel, the DTB, `s805_autoscript` and the NVRAM, with
 If ethernet needs an IC+ PHY driver, add `CONFIG_ICPLUS_PHY=y` to
 `config/kernel/linux-meson-current.config` (it is not enabled today).
 
+## Keeping the kernel pinned
+
+On a running system the kernel packages must stay on the version built from
+this tree. `apt.armbian.com` ships its own `linux-image-current-meson`, and that
+build carries the stock single-slot `meson-mx-sdio` driver, so a routine
+`apt upgrade` replaces the kernel, `slot@0` stops probing and `wlan0`
+disappears. This is easy to do by accident: `unattended-upgrades` is enabled in
+the image and will do it on its own.
+
+```sh
+sudo apt-mark hold linux-image-current-meson linux-dtb-current-meson \
+                   linux-headers-current-meson linux-libc-dev-current-meson
+```
+
+Verify with `apt-mark showhold`, and with `apt-get -s full-upgrade`: the kernel
+packages should not appear at all. Everything else upgrades normally and the
+kernel is simply reported as kept back.
+
+To move to a kernel built from this tree later:
+
+```sh
+sudo apt-mark unhold linux-image-current-meson linux-dtb-current-meson
+sudo dpkg -i linux-image-current-meson_*.deb linux-dtb-current-meson_*.deb
+sudo apt-mark hold linux-image-current-meson linux-dtb-current-meson
+sudo reboot
+```
+
+Holds do not stop an explicit `apt install`. For that, add a versions pin:
+
+```
+# /etc/apt/preferences.d/99-kiwibox-kernel
+Package: linux-image-current-meson linux-dtb-current-meson
+Pin: version 26.11.0-trunk
+Pin-Priority: 1001
+```
+
 ## WiFi (AP6181 / BCM43362)
 
 The WiFi chip is on SDIO port 0 of the same `meson-mx-sdio` controller as the
