@@ -223,6 +223,25 @@ sudo apt-mark hold linux-image-current-meson linux-dtb-current-meson
 sudo reboot
 ```
 
+Images built from this tree already ship pinned: `userpatches/customize-image.sh`
+runs `apt-mark hold` inside the chroot for `linux-image-current-meson`,
+`linux-dtb-current-meson` and `armbian-firmware`, and the hold lives in
+dpkg's status, so it survives flashing. `armbian-firmware` is pinned because an
+upgrade would restore the ~450 MiB of unused firmware pruned to fit the card;
+the same script writes `/etc/dpkg/dpkg.cfg.d/99-kiwibox-firmware` with
+`path-exclude` entries, so even an intentional firmware upgrade cannot bring
+those trees back (brcm and regulatory.db still update normally).
+
+`linux-headers-current-meson` and `linux-libc-dev-current-meson` are **not**
+installed in the image, and `apt-mark` can only hold packages it knows about -
+the chroot has no package lists. Pin those two after the first boot of a new
+flash:
+
+```sh
+sudo apt update
+sudo apt-mark hold linux-headers-current-meson linux-libc-dev-current-meson
+```
+
 Holds do not stop an explicit `apt install`. For that, add a versions pin:
 
 ```
