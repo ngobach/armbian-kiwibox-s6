@@ -97,6 +97,33 @@ No Armbian build is required for this loop: the DTB is a standalone file that
 `bootm` takes as its third argument, so you can iterate on the device tree
 without rebuilding the kernel or the image.
 
+## macOS and the boot partition
+
+Armbian tags the FAT boot partition as MBR type `0xEA` ("Linux extended boot").
+`mount_msdos` reads that fine, but Disk Arbitration refuses it, so
+`/Volumes/BOOT` never appears, Finder cannot show it, and `make deploy` needs a
+manual `sudo mount -t msdos /dev/diskN s1 /Volumes/BOOT`.
+
+Images built from this tree retag it as `0x0C` (FAT32 LBA) in a
+`post_build_image_modify` hook - a function Armbian calls after the final image
+is written, picked up from `userpatches/customize-image-host.sh`. macOS then
+mounts it like any other stick. The factory Amlogic u-boot only looks for a FAT
+filesystem and ignores the type byte; this was verified on hardware by booting
+an image with the modified table.
+
+Cards written before that change, and stock Armbian images, can be fixed in
+place - only byte 450 of the MBR (partition entry 1, the type field) changes,
+never the filesystems:
+
+```sh
+sudo ./scripts/set-parttype.sh --show          # print the layout, change nothing
+sudo ./scripts/set-parttype.sh /dev/disk4      # 0xEA -> 0x0C, asks first
+sudo ./scripts/set-parttype.sh /dev/disk4 --restore
+```
+
+The script saves the original MBR under `/tmp` and prints the exact rollback
+command. On Linux the equivalent is `sudo sfdisk --part-type /dev/sdX 1 c`.
+
 ## Bring-up order
 
 1. **Serial** — `ttyAML0`. If you see `Kiwibox S6` in `/proc/device-tree/model`,
